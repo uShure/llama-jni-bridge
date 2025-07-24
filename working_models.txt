@@ -1,0 +1,29 @@
+# Verified Working GGUF Models (2025-01-23)
+
+## Small Models (< 1GB)
+1. Qwen 0.5B - 395 MB
+   https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
+
+2. SmolLM 135M - 103 MB
+   https://huggingface.co/HuggingFaceTB/smollm-135M-instruct-GGUF/resolve/main/smollm-135m-instruct.q4_k_m.gguf
+
+3. TinyLlama Official - 638 MB
+   https://huggingface.co/PY007/TinyLlama-1.1B-Chat-v0.3-GGUF/resolve/main/tinyllama-1.1b-chat-v0.3.Q4_K_M.gguf
+
+## Medium Models (1-3 GB)
+1. Phi-3 Mini - 2.2 GB
+   https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf/resolve/main/Phi-3-mini-4k-instruct-q4.gguf
+
+2. Qwen 1.5B - 1.7 GB
+   https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf
+
+## Quick Download Commands:
+
+# Smallest and fastest (SmolLM 135M):
+wget https://huggingface.co/HuggingFaceTB/smollm-135M-instruct-GGUF/resolve/main/smollm-135m-instruct.q4_k_m.gguf -O smollm.gguf
+
+# Best small model (Qwen 0.5B):
+wget https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf -O qwen.gguf
+
+# TinyLlama (working version):
+wget https://huggingface.co/PY007/TinyLlama-1.1B-Chat-v0.3-GGUF/resolve/main/tinyllama-1.1b-chat-v0.3.Q4_K_M.gguf -O tinyllama.gguf
