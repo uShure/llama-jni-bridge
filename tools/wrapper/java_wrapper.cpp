@@ -45,14 +45,14 @@ static void set_last_error(const std::string& error) {
 extern "C" {
 #endif
 
-JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM * /* vm */, void * /* reserved */) {
     llama_backend_init();
     llama_numa_init(ggml_numa_strategy::GGML_NUMA_STRATEGY_DISABLED);
     last_error_message = "No error";
     return JNI_VERSION_1_8;
 }
 
-JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *reserved) {
+JNIEXPORT void JNICALL JNI_OnUnload(JavaVM * /* vm */, void * /* reserved */) {
     std::lock_guard<std::mutex> lock(g_context_registry_mutex);
     // Clean up any contexts the user forgot to destroy
     for (auto* data : g_active_contexts) {
@@ -357,7 +357,7 @@ JNIEXPORT jstring JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1get_1error
 }
 
 JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1get_1native_1memory_1usage
-  (JNIEnv *env, jclass, jlong handle) {
+  (JNIEnv * /* env */, jclass, jlong handle) {
     LlamaContextData* data = reinterpret_cast<LlamaContextData*>(handle);
     if (!is_valid_context(data)) {
         return -1;
