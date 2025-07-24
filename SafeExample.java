@@ -72,7 +72,7 @@ public class SafeExample {
 
             // Clean up
             System.out.println("Cleaning up...");
-            llama.llama_exit(handle);
+            llama.llama_destroy(handle);
             System.out.println("Done!");
 
         } catch (Exception e) {

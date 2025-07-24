@@ -17,10 +17,10 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
 
 /*
  * Class:     org_llm_wrapper_LlamaCpp
- * Method:    llama_exit
+ * Method:    llama_destroy
  * Signature: (J)V
  */
-JNIEXPORT void JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1exit
+JNIEXPORT void JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1destroy
   (JNIEnv *, jobject, jlong);
 
 /*

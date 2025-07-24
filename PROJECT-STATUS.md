@@ -83,7 +83,7 @@ gen.tokenCallback = token -> {
 LlamaCpp.llama_generate(handle, gen);
 
 // Cleanup
-LlamaCpp.llama_exit(handle);
+LlamaCpp.llama_destroy(handle);
 ```
 
 ## 📝 Git Repository Status

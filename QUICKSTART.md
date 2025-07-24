@@ -106,6 +106,6 @@ if (handle != 0) {
     genParams.nPredict = 50;
 
     llama.llama_generate(handle, genParams);
-    llama.llama_exit(handle);
+    llama.llama_destroy(handle);
 }
 ```

@@ -113,7 +113,7 @@ public class Example {
         int result = llama.llama_generate(handle, genParams);
 
         // Clean up
-        llama.llama_exit(handle);
+        llama.llama_destroy(handle);
     }
 }
 ```

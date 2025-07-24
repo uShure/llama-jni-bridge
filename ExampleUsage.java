@@ -81,7 +81,7 @@ public class ExampleUsage {
 
         // Cleanup
         System.out.println("Cleaning up...");
-        LlamaCpp.llama_exit(handle);
+        LlamaCpp.llama_destroy(handle);
         scanner.close();
 
         System.out.println("Goodbye!");

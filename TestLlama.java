@@ -96,7 +96,7 @@ public class TestLlama {
         } finally {
             if (handle != 0) {
                 System.out.println("\nCleaning up...");
-                llama.llama_exit(handle);
+                llama.llama_destroy(handle);
             }
         }
     }

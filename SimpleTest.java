@@ -32,6 +32,6 @@ public class SimpleTest {
         llama.llama_generate(handle, gen);
 
         // Очистка
-        llama.llama_exit(handle);
+        llama.llama_destroy(handle);
     }
 }

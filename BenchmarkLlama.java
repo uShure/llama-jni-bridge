@@ -79,7 +79,7 @@ public class BenchmarkLlama {
             long usedMemory = (runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024;
             System.out.println("\nMemory usage: " + usedMemory + " MB");
 
-            llama.llama_exit(handle);
+            llama.llama_destroy(handle);
         }
 
         System.out.println("\nBenchmark completed!");

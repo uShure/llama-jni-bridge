@@ -56,6 +56,6 @@ public class BatchExample {
         }
 
         // Cleanup
-        LlamaCpp.llama_exit(handle);
+        LlamaCpp.llama_destroy(handle);
     }
 }

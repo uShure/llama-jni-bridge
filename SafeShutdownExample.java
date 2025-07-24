@@ -18,7 +18,7 @@ public class SafeShutdownExample {
             System.out.println("\nShutting down...");
             if (modelHandle != 0) {
                 try {
-                    LlamaCpp.llama_exit(modelHandle);
+                    LlamaCpp.llama_destroy(modelHandle);
                     modelHandle = 0;
                 } catch (Exception e) {
                     System.err.println("Error during cleanup: " + e.getMessage());
@@ -70,7 +70,7 @@ public class SafeShutdownExample {
 
             // Clean up explicitly
             System.out.println("\nCleaning up...");
-            LlamaCpp.llama_exit(modelHandle);
+            LlamaCpp.llama_destroy(modelHandle);
             modelHandle = 0;
 
             System.out.println("Done!");

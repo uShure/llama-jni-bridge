@@ -67,7 +67,7 @@ public class Example {
 
             // Clean up
             System.out.println("Cleaning up...");
-            llama.llama_exit(handle);
+            llama.llama_destroy(handle);
 
         } catch (Exception e) {
             System.err.println("Error: " + e.getMessage());
