@@ -108,12 +108,8 @@ static jobject getObjectField(JNIEnv *env, jobject obj, const char* fieldName, c
 
 // --- JNI Implementations ---
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
-  (JNIEnv *env, jclass, jobject initParams) {
+  (JNIEnv *env, jobject, jobject initParams) {
     auto data = std::make_unique<LlamaContextData>();
 
     const char* modelPath_cstr = nullptr;
@@ -188,7 +184,7 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
 }
 
 JNIEXPORT void JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1destroy
-  (JNIEnv *, jclass, jlong handle) {
+  (JNIEnv *, jobject, jlong handle) {
     LlamaContextData* data = reinterpret_cast<LlamaContextData*>(handle);
     if (!is_valid_context(data)) return;
 
@@ -204,7 +200,7 @@ JNIEXPORT void JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1destroy
 }
 
 JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
-  (JNIEnv *env, jclass, jlong handle, jobject generateParams) {
+  (JNIEnv *env, jobject, jlong handle, jobject generateParams) {
 
     LlamaContextData* data = reinterpret_cast<LlamaContextData*>(handle);
     if (!is_valid_context(data)) {
@@ -381,10 +377,6 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1get_1native_1memory
 
     return static_cast<jlong>(model_size + ctx_size);
 }
-
-#ifdef __cplusplus
-}
-#endif
 
 #ifdef __clang__
 #pragma clang diagnostic pop
