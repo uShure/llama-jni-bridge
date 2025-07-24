@@ -12,7 +12,7 @@ public class LlamaCpp {
      * @param initParams Parameters for initialization.
      * @return A handle (pointer) to the created context, or 0 on failure.
      */
-    public static native long llama_init(InitParams initParams);
+    public static native long llama_init(InitParams params);
 
     /**
      * Frees all resources associated with a model context.
@@ -26,5 +26,8 @@ public class LlamaCpp {
      * @param generateParams Parameters for generation.
      * @return 0 on success, non-zero on failure.
      */
-    public static native int llama_generate(long handle, GenerateParams generateParams);
+    public static native int llama_generate(long handle, GenerateParams params);
+
+    public static native String llama_get_error();
+    public static native long llama_get_native_memory_usage(long handle);
 }

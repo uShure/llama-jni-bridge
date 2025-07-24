@@ -15,9 +15,18 @@
 #pragma clang diagnostic ignored "-Wmissing-prototypes"
 #endif
 
+// --- Context Data Structure ---
+
+struct LlamaContextData {
+    llama_model * model = nullptr;
+    llama_context * ctx = nullptr;
+    llama_sampler * sampler = nullptr;
+    common_params params;
+    int n_ctx = 0;
+};
+
 // --- Globals for safe resource management ---
 static std::mutex g_context_registry_mutex;
-struct LlamaContextData;
 static std::unordered_set<LlamaContextData*> g_active_contexts;
 
 // --- JNI Lifecycle Hooks ---
@@ -40,16 +49,6 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *reserved) {
     g_active_contexts.clear();
     llama_backend_free();
 }
-
-// --- Context Data Structure ---
-
-struct LlamaContextData {
-    llama_model * model = nullptr;
-    llama_context * ctx = nullptr;
-    llama_sampler * sampler = nullptr;
-    common_params params;
-    int n_ctx = 0;
-};
 
 // --- Helper Functions ---
 
@@ -319,6 +318,33 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     llama_batch_free(batch);
 
     return 0;
+}
+
+JNIEXPORT jstring JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1get_1error
+  (JNIEnv *env, jclass) {
+    return env->NewStringUTF(last_error_message.c_str());
+}
+
+JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1get_1native_1memory_1usage
+  (JNIEnv *env, jclass, jlong handle) {
+    LlamaContextData* data = reinterpret_cast<LlamaContextData*>(handle);
+    if (!is_valid_context(data)) {
+        return -1;
+    }
+
+    // Get model size in bytes
+    size_t model_size = 0;
+    if (data->model) {
+        model_size = llama_model_size(data->model);
+    }
+
+    // Get context memory usage
+    size_t ctx_size = 0;
+    if (data->ctx) {
+        ctx_size = llama_state_get_size(data->ctx);
+    }
+
+    return static_cast<jlong>(model_size + ctx_size);
 }
 
 #ifdef __clang__

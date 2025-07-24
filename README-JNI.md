@@ -12,6 +12,32 @@ A Java Native Interface (JNI) wrapper for llama.cpp, allowing Java applications 
 - Support for GPU acceleration via CUDA/Metal
 - Configurable generation parameters (temperature, top-k, top-p, etc.)
 
+## 🛡️ Safety Features
+
+This JNI wrapper implements robust safety mechanisms to prevent crashes and memory leaks:
+
+1. **JNI Lifecycle Management**
+   - `JNI_OnLoad`: Initializes backend when library loads
+   - `JNI_OnUnload`: Cleans up all resources when library unloads
+   - Automatic cleanup even if JVM crashes or user forgets to call destroy()
+
+2. **Context Registry & Validation**
+   - Thread-safe registry tracks all active contexts
+   - Every pointer validated before use
+   - Prevents use-after-free and crashes
+
+3. **Native Memory Tracking**
+   - `llama_get_native_memory_usage()`: Get actual native memory usage
+   - JVM memory tracking doesn't show native allocations
+   - See `MemoryExample.java` for demonstration
+
+4. **Thread-Safe Operations**
+   - Global mutex protects context registry
+   - Thread-local error messages
+   - Safe concurrent access
+
+See [SAFETY-FEATURES.md](SAFETY-FEATURES.md) for detailed documentation.
+
 ## Prerequisites
 
 - CMake 3.13 or higher
