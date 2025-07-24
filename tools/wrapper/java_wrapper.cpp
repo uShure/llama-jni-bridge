@@ -29,11 +29,26 @@ struct LlamaContextData {
 static std::mutex g_context_registry_mutex;
 static std::unordered_set<LlamaContextData*> g_active_contexts;
 
+// --- Error handling ---
+static std::mutex g_error_mutex;
+static std::string last_error_message;
+
+// --- Helper function for error handling ---
+static void set_last_error(const std::string& error) {
+    std::lock_guard<std::mutex> lock(g_error_mutex);
+    last_error_message = error;
+}
+
 // --- JNI Lifecycle Hooks ---
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     llama_backend_init();
     llama_numa_init(ggml_numa_strategy::GGML_NUMA_STRATEGY_DISABLED);
+    last_error_message = "No error";
     return JNI_VERSION_1_8;
 }
 
@@ -49,6 +64,10 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *reserved) {
     g_active_contexts.clear();
     llama_backend_free();
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 // --- Helper Functions ---
 
@@ -88,6 +107,10 @@ static jobject getObjectField(JNIEnv *env, jobject obj, const char* fieldName, c
 }
 
 // --- JNI Implementations ---
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
   (JNIEnv *env, jclass, jobject initParams) {
@@ -131,6 +154,7 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
 
     if (!data->model) {
         std::cerr << "Failed to load model" << std::endl;
+        set_last_error("Failed to load model from file");
         return 0;
     }
 
@@ -145,6 +169,7 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     data->ctx = llama_init_from_model(data->model, ctx_params);
     if (!data->ctx) {
         std::cerr << "Failed to create context" << std::endl;
+        set_last_error("Failed to create context from model");
         llama_model_free(data->model);
         return 0;
     }
@@ -182,8 +207,14 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
   (JNIEnv *env, jclass, jlong handle, jobject generateParams) {
 
     LlamaContextData* data = reinterpret_cast<LlamaContextData*>(handle);
-    if (!is_valid_context(data)) return -1;
-    if (!data || !data->ctx) return -1;
+    if (!is_valid_context(data)) {
+        set_last_error("Invalid context handle");
+        return -1;
+    }
+    if (!data || !data->ctx) {
+        set_last_error("Context is null or not initialized");
+        return -1;
+    }
 
     // Extract generation parameters
     jstring prompt_jstr = getStringField(env, generateParams, "prompt");
@@ -235,6 +266,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
 
     if (n_tokens < 0) {
         std::cerr << "Failed to tokenize prompt" << std::endl;
+        set_last_error("Failed to tokenize prompt");
         return -1;
     }
 
@@ -263,6 +295,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
 
     if (llama_decode(data->ctx, batch) != 0) {
         std::cerr << "llama_decode() failed" << std::endl;
+        set_last_error("Failed to decode initial prompt");
         llama_batch_free(batch);
         return -1;
     }
@@ -311,6 +344,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
 
         if (llama_decode(data->ctx, batch) != 0) {
             std::cerr << "llama_decode() failed" << std::endl;
+            set_last_error("Failed to decode during generation");
             break;
         }
     }
@@ -322,6 +356,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
 
 JNIEXPORT jstring JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1get_1error
   (JNIEnv *env, jclass) {
+    std::lock_guard<std::mutex> lock(g_error_mutex);
     return env->NewStringUTF(last_error_message.c_str());
 }
 
@@ -346,6 +381,10 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1get_1native_1memory
 
     return static_cast<jlong>(model_size + ctx_size);
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 #ifdef __clang__
 #pragma clang diagnostic pop
