@@ -264,8 +264,31 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     // Check if this is first prompt in the conversation
     const bool is_first = llama_memory_seq_pos_max(llama_get_memory(data->ctx), 0) == -1;
 
-    // Reset sampler for new generation
+    // Update sampler with new parameters
     llama_sampler_reset(data->sampler);
+    llama_sampler_free(data->sampler);
+
+    // Recreate sampler chain with user-provided parameters
+    data->sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
+
+    // Add samplers based on parameters
+    if (top_k > 0) {
+        llama_sampler_chain_add(data->sampler, llama_sampler_init_top_k(top_k));
+    }
+    if (top_p < 1.0f) {
+        llama_sampler_chain_add(data->sampler, llama_sampler_init_top_p(top_p, 1));
+    }
+    llama_sampler_chain_add(data->sampler, llama_sampler_init_min_p(0.05f, 1));
+    llama_sampler_chain_add(data->sampler, llama_sampler_init_temp(temp));
+    if (repeat_penalty != 1.0f) {
+        llama_sampler_chain_add(data->sampler, llama_sampler_init_penalties(
+            repeat_last_n,    // penalty_last_n
+            repeat_penalty,   // penalty_repeat
+            0.0f,            // penalty_freq (disabled)
+            0.0f             // penalty_present (disabled)
+        ));
+    }
+    llama_sampler_chain_add(data->sampler, llama_sampler_init_dist(seed >= 0 ? seed : LLAMA_DEFAULT_SEED));
 
     // Get chat template
     const char * tmpl = llama_model_chat_template(data->model, nullptr);
@@ -463,10 +486,8 @@ JNIEXPORT void JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1clear_1chat
     data->formatted_chat.clear();
     data->prev_len = 0;
 
-    // Clear KV cache
-    if (data->ctx) {
-        llama_kv_cache_clear(data->ctx);
-    }
+    // Clear the KV cache to start fresh
+    llama_memory_clear(llama_get_memory(data->ctx), true);
 }
 
 #ifdef __clang__
