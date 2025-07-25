@@ -30,4 +30,10 @@ public class LlamaCpp {
 
     public static native String llama_get_error();
     public static native long llama_get_native_memory_usage(long handle);
+
+    /**
+     * Clears the chat history and KV cache for a context.
+     * @param handle The handle returned by llama_init.
+     */
+    public static native void llama_clear_chat(long handle);
 }

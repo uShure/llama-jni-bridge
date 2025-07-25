@@ -23,6 +23,9 @@ struct LlamaContextData {
     llama_sampler * sampler = nullptr;
     common_params params;
     int n_ctx = 0;
+    std::vector<llama_chat_message> chat_messages;  // Store chat history
+    std::vector<char> formatted_chat;  // Store formatted chat
+    int prev_len = 0;  // Track previous formatted length
 };
 
 // --- Globals for safe resource management ---
@@ -46,6 +49,16 @@ extern "C" {
 #endif
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM * /* vm */, void * /* reserved */) {
+    // only print errors (like simple-chat.cpp)
+    llama_log_set([](enum ggml_log_level level, const char * text, void * /* user_data */) {
+        if (level >= GGML_LOG_LEVEL_ERROR) {
+            fprintf(stderr, "%s", text);
+        }
+    }, nullptr);
+
+    // load dynamic backends
+    ggml_backend_load_all();
+
     llama_backend_init();
     llama_numa_init(ggml_numa_strategy::GGML_NUMA_STRATEGY_DISABLED);
     last_error_message = "No error";
@@ -56,6 +69,10 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM * /* vm */, void * /* reserved */) {
     std::lock_guard<std::mutex> lock(g_context_registry_mutex);
     // Clean up any contexts the user forgot to destroy
     for (auto* data : g_active_contexts) {
+        // Free chat messages
+        for (auto & msg : data->chat_messages) {
+            free(const_cast<char *>(msg.content));
+        }
         if (data->sampler) llama_sampler_free(data->sampler);
         if (data->ctx) llama_free(data->ctx);
         if (data->model) llama_model_free(data->model);
@@ -170,9 +187,11 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
         return 0;
     }
 
-    // Initialize sampler
-    auto sparams = llama_sampler_chain_default_params();
-    data->sampler = llama_sampler_chain_init(sparams);
+    // Initialize sampler with simple-chat.cpp parameters
+    data->sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    llama_sampler_chain_add(data->sampler, llama_sampler_init_min_p(0.05f, 1));
+    llama_sampler_chain_add(data->sampler, llama_sampler_init_temp(0.8f));
+    llama_sampler_chain_add(data->sampler, llama_sampler_init_dist(seed >= 0 ? seed : LLAMA_DEFAULT_SEED));
 
     LlamaContextData* released_data = data.release();
     {
@@ -220,6 +239,8 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     }
     if (!prompt_cstr) return -1;
 
+    std::string user_input(prompt_cstr);
+
     int n_predict = getIntField(env, generateParams, "nPredict");
     int top_k = getIntField(env, generateParams, "topK");
     float top_p = getFloatField(env, generateParams, "topP");
@@ -229,40 +250,68 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     bool stream = getBooleanField(env, generateParams, "stream");
     int seed = getIntField(env, generateParams, "seed");
 
-    // Update sampler parameters
+    // Get vocab from model
+    const struct llama_vocab * vocab = llama_model_get_vocab(data->model);
+
+    // Check if this is first prompt in the conversation
+    const bool is_first = llama_memory_seq_pos_max(llama_get_memory(data->ctx), 0) == -1;
+
+    // Update sampler parameters (following simple-chat.cpp pattern)
     llama_sampler_reset(data->sampler);
     llama_sampler_free(data->sampler);
 
-    // Recreate sampler with new parameters
-    auto sparams = llama_sampler_chain_default_params();
-    data->sampler = llama_sampler_chain_init(sparams);
-
-    llama_sampler_chain_add(data->sampler, llama_sampler_init_penalties(
-        repeat_last_n,    // penalty_last_n
-        repeat_penalty,   // penalty_repeat
-        0.0f,             // penalty_freq
-        0.0f              // penalty_present
-    ));
-    llama_sampler_chain_add(data->sampler, llama_sampler_init_top_k(top_k));
-    llama_sampler_chain_add(data->sampler, llama_sampler_init_top_p(top_p, 1));
+    // Recreate sampler with parameters like simple-chat.cpp
+    data->sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    llama_sampler_chain_add(data->sampler, llama_sampler_init_min_p(0.05f, 1));
     llama_sampler_chain_add(data->sampler, llama_sampler_init_temp(temp));
-    llama_sampler_chain_add(data->sampler, llama_sampler_init_dist(seed));
+    llama_sampler_chain_add(data->sampler, llama_sampler_init_dist(seed >= 0 ? seed : LLAMA_DEFAULT_SEED));
 
-    // Tokenize prompt
-    std::vector<llama_token> tokens_list;
-    tokens_list.resize(data->n_ctx);
-    // Get vocab from model first
-    const struct llama_vocab * vocab = llama_model_get_vocab(data->model);
-    int n_tokens = llama_tokenize(vocab, prompt_cstr, strlen(prompt_cstr), tokens_list.data(), tokens_list.size(), true, false);
-    if (n_tokens > 0) {
-        tokens_list.resize(n_tokens);
+    // Get chat template
+    const char * tmpl = llama_model_chat_template(data->model, nullptr);
+
+    // Add user message to chat history
+    data->chat_messages.push_back({"user", strdup(user_input.c_str())});
+
+    // Format messages with chat template
+    if (data->formatted_chat.empty()) {
+        data->formatted_chat.resize(data->n_ctx);
     }
+
+    int new_len = llama_chat_apply_template(tmpl, data->chat_messages.data(),
+                                           data->chat_messages.size(), true,
+                                           data->formatted_chat.data(), data->formatted_chat.size());
+
+    if (new_len > (int)data->formatted_chat.size()) {
+        data->formatted_chat.resize(new_len);
+        new_len = llama_chat_apply_template(tmpl, data->chat_messages.data(),
+                                          data->chat_messages.size(), true,
+                                          data->formatted_chat.data(), data->formatted_chat.size());
+    }
+
+    if (new_len < 0) {
+        env->ReleaseStringUTFChars(prompt_jstr, prompt_cstr);
+        set_last_error("Failed to apply chat template");
+        return -1;
+    }
+
+    // Extract only the new part of the prompt (remove previous content)
+    std::string prompt(data->formatted_chat.begin() + data->prev_len,
+                      data->formatted_chat.begin() + new_len);
+
+    // Log the formatted prompt for debugging
+    fprintf(stderr, "\n=== Debug: Formatted prompt (new part only) ===\n");
+    fprintf(stderr, "%s", prompt.c_str());
+    fprintf(stderr, "\n=== End of formatted prompt ===\n");
 
     env->ReleaseStringUTFChars(prompt_jstr, prompt_cstr);
 
-    if (n_tokens < 0) {
-        std::cerr << "Failed to tokenize prompt" << std::endl;
-        set_last_error("Failed to tokenize prompt");
+    // Tokenize the new prompt part
+    const int n_prompt_tokens = -llama_tokenize(vocab, prompt.c_str(), prompt.size(),
+                                              NULL, 0, is_first, true);
+    std::vector<llama_token> prompt_tokens(n_prompt_tokens);
+    if (llama_tokenize(vocab, prompt.c_str(), prompt.size(),
+                      prompt_tokens.data(), prompt_tokens.size(), is_first, true) < 0) {
+        set_last_error("Failed to tokenize the prompt");
         return -1;
     }
 
@@ -276,53 +325,48 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         testMethod = env->GetMethodID(predicateClass, "test", "(Ljava/lang/Object;)Z");
     }
 
-    // Clear memory (KV cache) if needed
-    llama_memory_t mem = llama_get_memory(data->ctx);
-    llama_memory_clear(mem, 0); // Clear seq_id 0
+    // Prepare batch for the prompt tokens
+    llama_batch batch = llama_batch_get_one(prompt_tokens.data(), prompt_tokens.size());
+    std::string response;
+    llama_token new_token_id;
 
-    // Evaluate initial prompt
-    llama_batch batch = llama_batch_init(data->params.n_batch, 0, 1);
+    while (true) {
+        // Check if we have enough space in the context
+        int n_ctx = llama_n_ctx(data->ctx);
+        int n_ctx_used = llama_memory_seq_pos_max(llama_get_memory(data->ctx), 0) + 1;
+        if (n_ctx_used + batch.n_tokens > n_ctx) {
+            fprintf(stderr, "context size exceeded\n");
+            set_last_error("Context size exceeded");
+            return -1;
+        }
 
-    for (int i = 0; i < n_tokens; i++) {
-        common_batch_add(batch, tokens_list[i], i, { 0 }, false);
-    }
+        int ret = llama_decode(data->ctx, batch);
+        if (ret != 0) {
+            set_last_error("Failed to decode, ret = " + std::to_string(ret));
+            return -1;
+        }
 
-    batch.logits[batch.n_tokens - 1] = true;
+        // Sample the next token
+        new_token_id = llama_sampler_sample(data->sampler, data->ctx, -1);
 
-    if (llama_decode(data->ctx, batch) != 0) {
-        std::cerr << "llama_decode() failed" << std::endl;
-        set_last_error("Failed to decode initial prompt");
-        llama_batch_free(batch);
-        return -1;
-    }
-
-    int n_cur = batch.n_tokens;
-    int n_decode = 0;
-
-    // Generate tokens
-    std::string generated_text;
-
-    while (n_cur < data->n_ctx && n_decode < n_predict) {
-        // Sample next token
-        llama_token new_token_id = llama_sampler_sample(data->sampler, data->ctx, -1);
-
-        // Check for EOS
+        // Is it an end of generation?
         if (llama_vocab_is_eog(vocab, new_token_id)) {
             break;
         }
 
-        // Add token to the output
-        char token_str_buf[128];
-        int32_t n = llama_token_to_piece(vocab, new_token_id, token_str_buf, sizeof(token_str_buf), 0, false);
+        // Convert the token to a string
+        char buf[256];
+        int n = llama_token_to_piece(vocab, new_token_id, buf, sizeof(buf), 0, true);
         if (n < 0) {
-            n = 0;
+            set_last_error("Failed to convert token to piece");
+            break;
         }
-        std::string token_str(token_str_buf, n);
-        generated_text += token_str;
+        std::string piece(buf, n);
+        response += piece;
 
         // Stream callback
         if (stream && tokenCallback) {
-            jstring tokenJStr = env->NewStringUTF(token_str.c_str());
+            jstring tokenJStr = env->NewStringUTF(piece.c_str());
             jboolean shouldContinue = env->CallBooleanMethod(tokenCallback, testMethod, tokenJStr);
             env->DeleteLocalRef(tokenJStr);
 
@@ -331,21 +375,24 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
             }
         }
 
-        // Prepare next batch
-        common_batch_clear(batch);
-        common_batch_add(batch, new_token_id, n_cur, { 0 }, true);
-
-        n_cur++;
-        n_decode++;
-
-        if (llama_decode(data->ctx, batch) != 0) {
-            std::cerr << "llama_decode() failed" << std::endl;
-            set_last_error("Failed to decode during generation");
+        // Check max tokens
+        if ((int)response.length() >= n_predict) {
             break;
         }
+
+        // Prepare the next batch with the sampled token
+        batch = llama_batch_get_one(&new_token_id, 1);
     }
 
-    llama_batch_free(batch);
+    // Add the response to the messages
+    data->chat_messages.push_back({"assistant", strdup(response.c_str())});
+    data->prev_len = llama_chat_apply_template(tmpl, data->chat_messages.data(),
+                                              data->chat_messages.size(), false,
+                                              nullptr, 0);
+    if (data->prev_len < 0) {
+        set_last_error("Failed to apply the chat template");
+        return -1;
+    }
 
     return 0;
 }
@@ -376,6 +423,29 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1get_1native_1memory
     }
 
     return static_cast<jlong>(model_size + ctx_size);
+}
+
+JNIEXPORT void JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1clear_1chat
+  (JNIEnv *, jclass, jlong handle) {
+    LlamaContextData* data = reinterpret_cast<LlamaContextData*>(handle);
+    if (!is_valid_context(data)) {
+        return;
+    }
+
+    // Free existing chat messages
+    for (auto & msg : data->chat_messages) {
+        free(const_cast<char *>(msg.content));
+    }
+    data->chat_messages.clear();
+    
+    // Clear formatted chat buffer
+    data->formatted_chat.clear();
+    data->prev_len = 0;
+    
+    // Clear KV cache
+    if (data->ctx) {
+        llama_kv_cache_clear(data->ctx);
+    }
 }
 
 #ifdef __clang__
