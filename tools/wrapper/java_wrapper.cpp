@@ -264,31 +264,50 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     // Check if this is first prompt in the conversation
     const bool is_first = llama_memory_seq_pos_max(llama_get_memory(data->ctx), 0) == -1;
 
-    // Update sampler with new parameters
+    // Log generation parameters for debugging
+    fprintf(stderr, "\n=== Generation parameters ===\n");
+    fprintf(stderr, "n_predict: %d\n", n_predict);
+    fprintf(stderr, "temp: %.2f\n", temp);
+    fprintf(stderr, "top_k: %d\n", top_k);
+    fprintf(stderr, "top_p: %.2f\n", top_p);
+    fprintf(stderr, "repeat_penalty: %.2f\n", repeat_penalty);
+    fprintf(stderr, "repeat_last_n: %d\n", repeat_last_n);
+    fprintf(stderr, "seed: %d\n", seed);
+    fprintf(stderr, "stream: %s\n", stream ? "true" : "false");
+    fprintf(stderr, "=== End parameters ===\n");
+
+    // Reset sampler for new generation
     llama_sampler_reset(data->sampler);
-    llama_sampler_free(data->sampler);
 
-    // Recreate sampler chain with user-provided parameters
-    data->sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    // Check if we need to recreate sampler with different parameters
+    // Default values: temp=0.8, top_k=40, top_p=0.9, repeat_penalty=1.1
+    bool use_default_sampler = (temp == 0.8f && top_k == 40 && top_p == 0.9f &&
+                                repeat_penalty == 1.1f && seed == -1);
 
-    // Add samplers based on parameters
-    if (top_k > 0) {
-        llama_sampler_chain_add(data->sampler, llama_sampler_init_top_k(top_k));
+    if (!use_default_sampler) {
+        // Recreate sampler chain with user-provided parameters
+        llama_sampler_free(data->sampler);
+        data->sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
+
+        // Add samplers to match llama-cli behavior
+        if (top_k > 0 && top_k < llama_vocab_n_tokens(vocab)) {
+            llama_sampler_chain_add(data->sampler, llama_sampler_init_top_k(top_k));
+        }
+        if (top_p < 1.0f && top_p > 0.0f) {
+            llama_sampler_chain_add(data->sampler, llama_sampler_init_top_p(top_p, 1));
+        }
+        llama_sampler_chain_add(data->sampler, llama_sampler_init_min_p(0.05f, 1));
+        llama_sampler_chain_add(data->sampler, llama_sampler_init_temp(temp));
+        if (repeat_penalty != 1.0f && repeat_last_n > 0) {
+            llama_sampler_chain_add(data->sampler, llama_sampler_init_penalties(
+                repeat_last_n,    // penalty_last_n
+                repeat_penalty,   // penalty_repeat
+                0.0f,            // penalty_freq (disabled)
+                0.0f             // penalty_present (disabled)
+            ));
+        }
+        llama_sampler_chain_add(data->sampler, llama_sampler_init_dist(seed >= 0 ? seed : LLAMA_DEFAULT_SEED));
     }
-    if (top_p < 1.0f) {
-        llama_sampler_chain_add(data->sampler, llama_sampler_init_top_p(top_p, 1));
-    }
-    llama_sampler_chain_add(data->sampler, llama_sampler_init_min_p(0.05f, 1));
-    llama_sampler_chain_add(data->sampler, llama_sampler_init_temp(temp));
-    if (repeat_penalty != 1.0f) {
-        llama_sampler_chain_add(data->sampler, llama_sampler_init_penalties(
-            repeat_last_n,    // penalty_last_n
-            repeat_penalty,   // penalty_repeat
-            0.0f,            // penalty_freq (disabled)
-            0.0f             // penalty_present (disabled)
-        ));
-    }
-    llama_sampler_chain_add(data->sampler, llama_sampler_init_dist(seed >= 0 ? seed : LLAMA_DEFAULT_SEED));
 
     // Get chat template
     const char * tmpl = llama_model_chat_template(data->model, nullptr);
@@ -323,9 +342,24 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
                       data->formatted_chat.begin() + new_len);
 
     // Log the formatted prompt for debugging
-    fprintf(stderr, "\n=== Debug: Formatted prompt (new part only) ===\n");
+    fprintf(stderr, "\n=== Debug: Chat template application ===\n");
+    fprintf(stderr, "Template: %s\n", tmpl ? tmpl : "null");
+    fprintf(stderr, "Messages count: %zu\n", data->chat_messages.size());
+    fprintf(stderr, "Previous length: %d\n", data->prev_len);
+    fprintf(stderr, "New length: %d\n", new_len);
+    fprintf(stderr, "Is first message: %s\n", is_first ? "true" : "false");
+    fprintf(stderr, "\n=== Formatted prompt (new part only) ===\n");
     fprintf(stderr, "%s", prompt.c_str());
-    fprintf(stderr, "\n=== End of formatted prompt ===\n");
+    fprintf(stderr, "\n=== End of formatted prompt (length: %zu) ===\n", prompt.length());
+
+    // Log first few tokens for debugging
+    if (prompt.length() > 0) {
+        fprintf(stderr, "First 10 chars (hex): ");
+        for (size_t i = 0; i < std::min(prompt.length(), size_t(10)); i++) {
+            fprintf(stderr, "%02x ", (unsigned char)prompt[i]);
+        }
+        fprintf(stderr, "\n");
+    }
 
     env->ReleaseStringUTFChars(prompt_jstr, prompt_cstr);
 
@@ -351,7 +385,13 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
 
     // Process prompt tokens in batches (matching simple-chat.cpp)
     int n_batch = llama_n_batch(data->ctx);
+    int n_ctx = llama_n_ctx(data->ctx);
     std::string response;
+
+    fprintf(stderr, "\n=== Batch processing ===\n");
+    fprintf(stderr, "Prompt tokens: %d\n", n_prompt_tokens);
+    fprintf(stderr, "Batch size: %d\n", n_batch);
+    fprintf(stderr, "Context size: %d\n", n_ctx);
 
     // First, process the prompt tokens in batches
     for (int i = 0; i < n_prompt_tokens; i += n_batch) {
@@ -359,10 +399,13 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         llama_batch batch = llama_batch_get_one(prompt_tokens.data() + i, batch_size);
 
         // Check if we have enough space in the context
-        int n_ctx = llama_n_ctx(data->ctx);
         int n_ctx_used = llama_memory_seq_pos_max(llama_get_memory(data->ctx), 0) + 1;
+        fprintf(stderr, "Processing batch %d-%d, context used: %d/%d\n",
+                i, i + batch_size, n_ctx_used, n_ctx);
+
         if (n_ctx_used + batch.n_tokens > n_ctx) {
-            fprintf(stderr, "context size exceeded\n");
+            fprintf(stderr, "context size exceeded: used %d + batch %d > max %d\n",
+                    n_ctx_used, batch.n_tokens, n_ctx);
             set_last_error("Context size exceeded");
             return -1;
         }
@@ -373,6 +416,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
             return -1;
         }
     }
+    fprintf(stderr, "=== End batch processing ===\n");
 
     // Now generate the response token by token
     llama_token new_token_id;
@@ -430,6 +474,9 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
 
     // Add the response to the messages
     data->chat_messages.push_back({"assistant", strdup(response.c_str())});
+
+    // Update prev_len to point to end of all messages (without adding assistant prefix)
+    // This matches simple-chat.cpp behavior
     data->prev_len = llama_chat_apply_template(tmpl, data->chat_messages.data(),
                                               data->chat_messages.size(), false,
                                               nullptr, 0);
@@ -437,6 +484,12 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         set_last_error("Failed to apply the chat template");
         return -1;
     }
+
+    fprintf(stderr, "\n=== Generation complete ===\n");
+    fprintf(stderr, "Response length: %zu tokens\n", response.length());
+    fprintf(stderr, "Updated prev_len: %d\n", data->prev_len);
+    fprintf(stderr, "Total messages: %zu\n", data->chat_messages.size());
+    fprintf(stderr, "=========================\n");
 
     return 0;
 }
