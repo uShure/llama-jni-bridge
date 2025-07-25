@@ -1,0 +1,93 @@
+cmake_minimum_required(VERSION 3.14)
+project("llama.cpp" VERSION 0.0.1 LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+# Set output directories before any add_subdirectory calls
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+
+# Options
+option(GGML_METAL "Enable Metal support" OFF)
+option(GGML_CUDA "Enable CUDA support" OFF)
+option(BUILD_SHARED_LIBS "Build shared libraries" ON)
+
+# Add ggml
+add_subdirectory(ggml)
+
+# Include directories
+include_directories(
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/common
+    ${CMAKE_CURRENT_SOURCE_DIR}/ggml/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/common  # For nlohmann/json.hpp
+)
+
+# Common sources - exclude problematic files for JNI build
+file(GLOB COMMON_SOURCES
+    "common/*.cpp"
+    "common/*.h"
+)
+list(REMOVE_ITEM COMMON_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/common/arg.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/common/chat.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/common/chat-parser.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/common/json-partial.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/common/json-schema-to-grammar.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/common/llguidance.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/common/regex-partial.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/common/speculative.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/common/ngram-cache.cpp
+)
+
+# Add build info
+list(APPEND COMMON_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/common/build-info.cpp)
+
+# Core llama sources
+file(GLOB LLAMA_SOURCES
+    "src/*.cpp"
+    "src/*.h"
+)
+
+# Create llama library
+add_library(llama SHARED ${LLAMA_SOURCES} ${COMMON_SOURCES})
+target_link_libraries(llama PUBLIC ggml)
+target_include_directories(llama PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/common
+)
+
+# Set properties
+set_target_properties(llama PROPERTIES
+    PUBLIC_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/include/llama.h"
+)
+
+# Find JNI
+find_package(JNI REQUIRED)
+
+# JNI wrapper
+add_library(java_wrapper SHARED tools/wrapper/java_wrapper.cpp)
+target_include_directories(java_wrapper PRIVATE
+    ${JNI_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/common
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/wrapper
+)
+target_link_libraries(java_wrapper PRIVATE llama ggml)
+
+# Set output directory
+set_target_properties(java_wrapper PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+# Installation
+install(TARGETS llama java_wrapper
+    LIBRARY DESTINATION lib
+    RUNTIME DESTINATION bin
+    PUBLIC_HEADER DESTINATION include
+)
