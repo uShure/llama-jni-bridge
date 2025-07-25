@@ -320,15 +320,39 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         data->formatted_chat.resize(data->n_ctx);
     }
 
-    int new_len = llama_chat_apply_template(tmpl, data->chat_messages.data(),
+    int new_len;
+    if (tmpl == nullptr) {
+        // No template found - use simple format for Llama-2
+        fprintf(stderr, "No chat template found, using simple format\n");
+
+        // For first message, just use the prompt directly
+        if (is_first) {
+            new_len = snprintf(data->formatted_chat.data(), data->formatted_chat.size(),
+                             "%s", user_input.c_str());
+        } else {
+            // For subsequent messages, append to existing conversation
+            std::string formatted_messages;
+            for (size_t i = 0; i < data->chat_messages.size() - 1; i++) {
+                formatted_messages += data->chat_messages[i].content;
+                formatted_messages += "\n";
+            }
+            formatted_messages += user_input;
+
+            new_len = snprintf(data->formatted_chat.data(), data->formatted_chat.size(),
+                             "%s", formatted_messages.c_str());
+        }
+    } else {
+        // Use the model's chat template
+        new_len = llama_chat_apply_template(tmpl, data->chat_messages.data(),
                                            data->chat_messages.size(), true,
                                            data->formatted_chat.data(), data->formatted_chat.size());
 
-    if (new_len > (int)data->formatted_chat.size()) {
-        data->formatted_chat.resize(new_len);
-        new_len = llama_chat_apply_template(tmpl, data->chat_messages.data(),
-                                          data->chat_messages.size(), true,
-                                          data->formatted_chat.data(), data->formatted_chat.size());
+        if (new_len > (int)data->formatted_chat.size()) {
+            data->formatted_chat.resize(new_len);
+            new_len = llama_chat_apply_template(tmpl, data->chat_messages.data(),
+                                              data->chat_messages.size(), true,
+                                              data->formatted_chat.data(), data->formatted_chat.size());
+        }
     }
 
     if (new_len < 0) {
@@ -477,12 +501,20 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
 
     // Update prev_len to point to end of all messages (without adding assistant prefix)
     // This matches simple-chat.cpp behavior
-    data->prev_len = llama_chat_apply_template(tmpl, data->chat_messages.data(),
-                                              data->chat_messages.size(), false,
-                                              nullptr, 0);
-    if (data->prev_len < 0) {
-        set_last_error("Failed to apply the chat template");
-        return -1;
+    if (tmpl == nullptr) {
+        // For simple format, calculate the length of all messages
+        data->prev_len = 0;
+        for (const auto& msg : data->chat_messages) {
+            data->prev_len += strlen(msg.content) + 1; // +1 for newline
+        }
+    } else {
+        data->prev_len = llama_chat_apply_template(tmpl, data->chat_messages.data(),
+                                                  data->chat_messages.size(), false,
+                                                  nullptr, 0);
+        if (data->prev_len < 0) {
+            set_last_error("Failed to apply the chat template");
+            return -1;
+        }
     }
 
     fprintf(stderr, "\n=== Generation complete ===\n");
