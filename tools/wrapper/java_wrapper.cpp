@@ -146,6 +146,11 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     data->params.cpuparams_batch.n_threads = getIntField(env, initParams, "nThreadsBatch");
     data->params.devices.clear();  // Will use default device
 
+    // Match simple-chat.cpp: if n_batch is 0, set it to n_ctx
+    if (data->params.n_batch == 0) {
+        data->params.n_batch = data->params.n_ctx;
+    }
+
     int n_gpu_layers = getIntField(env, initParams, "nGpuLayers");
     int seed = getIntField(env, initParams, "seed");
     bool use_mmap = getBooleanField(env, initParams, "useMmap");
@@ -192,6 +197,9 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     llama_sampler_chain_add(data->sampler, llama_sampler_init_min_p(0.05f, 1));
     llama_sampler_chain_add(data->sampler, llama_sampler_init_temp(0.8f));
     llama_sampler_chain_add(data->sampler, llama_sampler_init_dist(seed >= 0 ? seed : LLAMA_DEFAULT_SEED));
+
+    // Initialize formatted_chat buffer with context size
+    data->formatted_chat.resize(data->n_ctx);
 
     LlamaContextData* released_data = data.release();
     {
@@ -256,15 +264,8 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     // Check if this is first prompt in the conversation
     const bool is_first = llama_memory_seq_pos_max(llama_get_memory(data->ctx), 0) == -1;
 
-    // Update sampler parameters (following simple-chat.cpp pattern)
+    // Reset sampler for new generation
     llama_sampler_reset(data->sampler);
-    llama_sampler_free(data->sampler);
-
-    // Recreate sampler with parameters like simple-chat.cpp
-    data->sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
-    llama_sampler_chain_add(data->sampler, llama_sampler_init_min_p(0.05f, 1));
-    llama_sampler_chain_add(data->sampler, llama_sampler_init_temp(temp));
-    llama_sampler_chain_add(data->sampler, llama_sampler_init_dist(seed >= 0 ? seed : LLAMA_DEFAULT_SEED));
 
     // Get chat template
     const char * tmpl = llama_model_chat_template(data->model, nullptr);
@@ -325,12 +326,15 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         testMethod = env->GetMethodID(predicateClass, "test", "(Ljava/lang/Object;)Z");
     }
 
-    // Prepare batch for the prompt tokens
-    llama_batch batch = llama_batch_get_one(prompt_tokens.data(), prompt_tokens.size());
+    // Process prompt tokens in batches (matching simple-chat.cpp)
+    int n_batch = llama_n_batch(data->ctx);
     std::string response;
-    llama_token new_token_id;
 
-    while (true) {
+    // First, process the prompt tokens in batches
+    for (int i = 0; i < n_prompt_tokens; i += n_batch) {
+        int batch_size = std::min(n_batch, n_prompt_tokens - i);
+        llama_batch batch = llama_batch_get_one(prompt_tokens.data() + i, batch_size);
+
         // Check if we have enough space in the context
         int n_ctx = llama_n_ctx(data->ctx);
         int n_ctx_used = llama_memory_seq_pos_max(llama_get_memory(data->ctx), 0) + 1;
@@ -342,10 +346,16 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
 
         int ret = llama_decode(data->ctx, batch);
         if (ret != 0) {
-            set_last_error("Failed to decode, ret = " + std::to_string(ret));
+            set_last_error("Failed to decode prompt batch, ret = " + std::to_string(ret));
             return -1;
         }
+    }
 
+    // Now generate the response token by token
+    llama_token new_token_id;
+    int n_generated = 0;
+
+    while (n_generated < n_predict) {
         // Sample the next token
         new_token_id = llama_sampler_sample(data->sampler, data->ctx, -1);
 
@@ -363,6 +373,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         }
         std::string piece(buf, n);
         response += piece;
+        n_generated++;
 
         // Stream callback
         if (stream && tokenCallback) {
@@ -375,13 +386,23 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
             }
         }
 
-        // Check max tokens
-        if ((int)response.length() >= n_predict) {
+        // Prepare the next batch with the sampled token
+        llama_batch batch = llama_batch_get_one(&new_token_id, 1);
+
+        // Check context size again
+        int n_ctx = llama_n_ctx(data->ctx);
+        int n_ctx_used = llama_memory_seq_pos_max(llama_get_memory(data->ctx), 0) + 1;
+        if (n_ctx_used + batch.n_tokens > n_ctx) {
+            fprintf(stderr, "context size exceeded\n");
+            set_last_error("Context size exceeded");
             break;
         }
 
-        // Prepare the next batch with the sampled token
-        batch = llama_batch_get_one(&new_token_id, 1);
+        int ret = llama_decode(data->ctx, batch);
+        if (ret != 0) {
+            set_last_error("Failed to decode, ret = " + std::to_string(ret));
+            break;
+        }
     }
 
     // Add the response to the messages
@@ -437,11 +458,11 @@ JNIEXPORT void JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1clear_1chat
         free(const_cast<char *>(msg.content));
     }
     data->chat_messages.clear();
-    
+
     // Clear formatted chat buffer
     data->formatted_chat.clear();
     data->prev_len = 0;
-    
+
     // Clear KV cache
     if (data->ctx) {
         llama_kv_cache_clear(data->ctx);
