@@ -79,7 +79,7 @@ public class CacheReuseExample {
                 genParams.topK = 40;
                 genParams.topP = 0.95f;
                 genParams.repeatPenalty = 1.1f;
-                genParams.stream = true;
+                //genParams.stream = true;
 
                 // Callback для вывода токенов по мере генерации
                 genParams.tokenCallback = token -> {
