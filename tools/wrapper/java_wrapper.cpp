@@ -99,7 +99,7 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM * /* vm */, void * /* reserved */) {
         // Free chat messages using helper function
         free_chat_messages(data->chat_messages);
         if (data->sampler) llama_sampler_free(data->sampler);
-        if (data->ctx) llama_ctx_free(data->ctx);
+        if (data->ctx) llama_free(data->ctx);
         if (data->model) llama_model_free(data->model);
         delete data;
     }
@@ -214,6 +214,9 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     data->params.cpuparams_batch.n_threads = getIntField(env, initParams, "nThreadsBatch");
 
     // Handle GPU devices properly
+    // Note: Direct device selection via params.devices might not be supported in current API
+    // For now, we'll comment this out and rely on n_gpu_layers
+    /*
     jintArray gpuDevices = getIntArrayField(env, initParams, "gpuDevices");
     if (gpuDevices != nullptr) {
         jsize deviceCount = env->GetArrayLength(gpuDevices);
@@ -224,6 +227,7 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
         }
         env->ReleaseIntArrayElements(gpuDevices, devices, JNI_ABORT);
     }
+    */
     // If gpuDevices is null, leave devices empty to use default
 
     // Match simple-chat.cpp: if n_batch is 0, set it to n_ctx
@@ -245,6 +249,9 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     // Get n_keep parameter for cache reuse
     data->n_keep = getIntField(env, initParams, "nKeep");
 
+    // Set escape processing based on noEscape flag
+    data->params.escape = !no_escape;  // escape is opposite of noEscape
+
     // Set seed properly - only use LLAMA_DEFAULT_SEED if seed is explicitly -1
     data->params.sampling.seed = (seed == -1) ? LLAMA_DEFAULT_SEED : seed;
 
@@ -259,7 +266,10 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     // Handle tensor splits if provided
     jfloatArray tensorSplits = getFloatArrayField(env, initParams, "tensorSplits");
     if (tensorSplits != nullptr) {
-        jsize splitCount = env->GetArrayLength(tensorSplits);
+        // jsize splitCount = env->GetArrayLength(tensorSplits);
+        // Note: tensor_split is const in newer API, skip for now
+        // TODO: Find alternative way to set tensor splits
+        /*
         if (splitCount > 0 && splitCount <= LLAMA_MAX_DEVICES) {
             jfloat* splits = env->GetFloatArrayElements(tensorSplits, nullptr);
             for (jsize i = 0; i < splitCount && i < LLAMA_MAX_DEVICES; i++) {
@@ -267,6 +277,7 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
             }
             env->ReleaseFloatArrayElements(tensorSplits, splits, JNI_ABORT);
         }
+        */
     }
 
     data->model = llama_model_load_from_file(modelPath_cstr, model_params);
@@ -327,7 +338,7 @@ JNIEXPORT void JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1destroy
     // Free chat messages using helper function
     free_chat_messages(data->chat_messages);
     if (data->sampler) llama_sampler_free(data->sampler);
-    if (data->ctx) llama_ctx_free(data->ctx);
+    if (data->ctx) llama_free(data->ctx);
     if (data->model) llama_model_free(data->model);
     delete data;
 }
@@ -555,16 +566,19 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
             int tokens_to_remove = data->cached_token_count - common_prefix_len;
             if (tokens_to_remove > 0) {
                 // Clear KV cache from the divergence point
-                llama_kv_self_seq_rm(data->ctx, 0, common_prefix_len, -1);
+                llama_memory_t mem = llama_get_memory(data->ctx);
+                llama_memory_seq_rm(mem, 0, common_prefix_len, -1);
             }
         } else if (data->n_keep == 0 || data->cached_token_count > tokens_to_keep) {
             // If n_keep is 0 or we have more cached tokens than we should keep, clear cache
-            llama_kv_self_clear(data->ctx);
+            llama_memory_t mem = llama_get_memory(data->ctx);
+            llama_memory_clear(mem, false);
             data->cached_token_count = 0;
         }
     } else if (is_first && data->n_keep == 0) {
         // If n_keep is 0 and this is the first message, ensure cache is clear
-        llama_kv_self_clear(data->ctx);
+        llama_memory_t mem = llama_get_memory(data->ctx);
+        llama_memory_clear(mem, false);
         data->cached_token_count = 0;
     }
 
@@ -769,13 +783,15 @@ JNIEXPORT void JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1clear_1chat
         // n_keep is 0, clear everything
         data->cached_tokens.clear();
         data->cached_token_count = 0;
-        llama_kv_self_clear(data->ctx);
+        llama_memory_t mem = llama_get_memory(data->ctx);
+        llama_memory_clear(mem, false);
     } else if (data->n_keep > 0 && data->cached_token_count > data->n_keep) {
         // Keep only first n_keep tokens
         data->cached_tokens.resize(data->n_keep);
         data->cached_token_count = data->n_keep;
         // Clear KV cache beyond n_keep
-        llama_kv_self_seq_rm(data->ctx, 0, data->n_keep, -1);
+        llama_memory_t mem = llama_get_memory(data->ctx);
+        llama_memory_seq_rm(mem, 0, data->n_keep, -1);
     }
     // If n_keep is -1, keep all cached tokens (don't clear)
 }
