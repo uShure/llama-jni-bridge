@@ -214,21 +214,31 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     data->params.cpuparams_batch.n_threads = getIntField(env, initParams, "nThreadsBatch");
 
     // Handle GPU devices properly
-    // Note: Direct device selection via params.devices might not be supported in current API
-    // For now, we'll comment this out and rely on n_gpu_layers
-    /*
+    // Note: The devices parameter might not be directly supported in newer API versions
+    // Instead, GPU usage is typically controlled via n_gpu_layers and tensor_split
+
     jintArray gpuDevices = getIntArrayField(env, initParams, "gpuDevices");
     if (gpuDevices != nullptr) {
         jsize deviceCount = env->GetArrayLength(gpuDevices);
-        jint* devices = env->GetIntArrayElements(gpuDevices, nullptr);
-        data->params.devices.clear();
-        for (jsize i = 0; i < deviceCount; i++) {
-            data->params.devices.push_back(devices[i]);
+        if (deviceCount > 0) {
+            jint* devices = env->GetIntArrayElements(gpuDevices, nullptr);
+
+            // Log the requested devices
+            fprintf(stderr, "Requested GPU devices: ");
+            for (jsize i = 0; i < deviceCount; i++) {
+                fprintf(stderr, "%d ", devices[i]);
+            }
+            fprintf(stderr, "\n");
+
+            // Note: In newer llama.cpp, device selection is often automatic
+            // based on n_gpu_layers. The specific device IDs might not be
+            // directly configurable through the context parameters.
+            // This is logged for debugging purposes.
+
+            env->ReleaseIntArrayElements(gpuDevices, devices, JNI_ABORT);
         }
-        env->ReleaseIntArrayElements(gpuDevices, devices, JNI_ABORT);
     }
-    */
-    // If gpuDevices is null, leave devices empty to use default
+    // If gpuDevices is null, use default GPU selection based on n_gpu_layers
 
     // Match simple-chat.cpp: if n_batch is 0, set it to n_ctx
     if (data->params.n_batch == 0) {
@@ -245,6 +255,15 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     int cache_type_k = getIntField(env, initParams, "cacheTypeK");
     int cache_type_v = getIntField(env, initParams, "cacheTypeV");
     bool no_escape = getBooleanField(env, initParams, "noEscape");
+
+    // Add support for draft model cache types
+    int cache_type_k_draft = getIntField(env, initParams, "cacheTypeKDraft");
+    int cache_type_v_draft = getIntField(env, initParams, "cacheTypeVDraft");
+
+    // Note: Draft cache types would be used when loading draft models for speculative decoding
+    // Currently stored for future use when draft model support is added
+    (void)cache_type_k_draft; // Suppress unused warning
+    (void)cache_type_v_draft; // Suppress unused warning
 
     // Get n_keep parameter for cache reuse
     data->n_keep = getIntField(env, initParams, "nKeep");
@@ -381,8 +400,26 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     // Check if this is first prompt in the conversation
     const bool is_first = llama_memory_seq_pos_max(llama_get_memory(data->ctx), 0) == -1;
 
-    // Log generation parameters for debugging
-    fprintf(stderr, "\n=== Generation parameters ===\n");
+    // Get keep parameter from GenerateParams to allow per-generation control
+    int keep = getIntField(env, generateParams, "keep");
+
+    // If keep is specified in GenerateParams and different from the init value, update it
+    if (keep != -1 && keep != data->n_keep) {
+        fprintf(stderr, "Overriding n_keep: %d -> %d for this generation\n", data->n_keep, keep);
+        // Override n_keep for this generation
+        data->n_keep = keep;
+
+        // If we're disabling caching (keep=0) and have cached tokens, clear them
+        if (keep == 0 && data->cached_token_count > 0) {
+            llama_memory_t mem = llama_get_memory(data->ctx);
+            llama_memory_clear(mem, false);
+            data->cached_tokens.clear();
+            data->cached_token_count = 0;
+        }
+    }
+
+    // Debug output
+    fprintf(stderr, "\n=== Generate parameters ===\n");
     fprintf(stderr, "n_predict: %d\n", n_predict);
     fprintf(stderr, "temp: %.2f\n", temp);
     fprintf(stderr, "top_k: %d\n", top_k);
@@ -391,7 +428,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     fprintf(stderr, "repeat_last_n: %d\n", repeat_last_n);
     fprintf(stderr, "seed: %d\n", seed);
     fprintf(stderr, "stream: %s\n", stream ? "true" : "false");
-    fprintf(stderr, "=== End parameters ===\n");
+    fprintf(stderr, "=== End parameters ===\n\n");
 
     // Reset sampler for new generation
     llama_sampler_reset(data->sampler);
@@ -531,50 +568,44 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
 
     // Only reuse cache if n_keep is enabled (not 0)
     if (!is_first && data->cached_token_count > 0 && data->n_keep != 0) {
-        // Determine how many tokens we should keep
-        int tokens_to_keep = data->n_keep;
-        if (data->n_keep == -1) {
-            // Keep all tokens
-            tokens_to_keep = data->cached_token_count;
-        } else {
-            // Keep at most n_keep tokens
-            tokens_to_keep = std::min(data->n_keep, data->cached_token_count);
-        }
+        // For large prompts with small questions, we want to find the common prefix
+        // between the old and new token sequences
 
-        // Compare tokens to find common prefix, but only up to tokens_to_keep
-        int max_compare = std::min(tokens_to_keep, n_prompt_tokens);
+        // Compare tokens to find the longest common prefix
+        int max_compare = std::min(data->cached_token_count, n_prompt_tokens);
         for (int i = 0; i < max_compare; i++) {
             if (data->cached_tokens[i] == prompt_tokens[i]) {
                 common_prefix_len++;
             } else {
-                break;
+                break;  // Stop at first mismatch
             }
         }
+
+        // If n_keep is set to a specific value, limit the prefix length
+        if (data->n_keep > 0) {
+            common_prefix_len = std::min(common_prefix_len, data->n_keep);
+        }
+        // If n_keep is -1, use all common prefix tokens
 
         fprintf(stderr, "\n=== Cache reuse analysis ===\n");
         fprintf(stderr, "n_keep: %d\n", data->n_keep);
         fprintf(stderr, "Cached tokens: %d\n", data->cached_token_count);
-        fprintf(stderr, "Tokens to keep: %d\n", tokens_to_keep);
         fprintf(stderr, "New prompt tokens: %d\n", n_prompt_tokens);
         fprintf(stderr, "Common prefix length: %d\n", common_prefix_len);
         fprintf(stderr, "Tokens to process: %d\n", n_prompt_tokens - common_prefix_len);
         fprintf(stderr, "===========================\n");
 
         // If we have a common prefix, we can skip processing those tokens
-        if (common_prefix_len > 0) {
+        if (common_prefix_len > 0 && common_prefix_len < data->cached_token_count) {
             // Remove non-matching tokens from KV cache
-            int tokens_to_remove = data->cached_token_count - common_prefix_len;
-            if (tokens_to_remove > 0) {
-                // Clear KV cache from the divergence point
-                llama_memory_t mem = llama_get_memory(data->ctx);
-                llama_memory_seq_rm(mem, 0, common_prefix_len, -1);
-            }
-        } else if (data->n_keep == 0 || data->cached_token_count > tokens_to_keep) {
-            // If n_keep is 0 or we have more cached tokens than we should keep, clear cache
+            llama_memory_t mem = llama_get_memory(data->ctx);
+            llama_memory_seq_rm(mem, 0, common_prefix_len, -1);
+        } else if (common_prefix_len == 0) {
+            // No common prefix, clear the cache
             llama_memory_t mem = llama_get_memory(data->ctx);
             llama_memory_clear(mem, false);
-            data->cached_token_count = 0;
         }
+        // If common_prefix_len == cached_token_count, all cached tokens match, keep them all
     } else if (is_first && data->n_keep == 0) {
         // If n_keep is 0 and this is the first message, ensure cache is clear
         llama_memory_t mem = llama_get_memory(data->ctx);
@@ -582,21 +613,9 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         data->cached_token_count = 0;
     }
 
-    // Update cached tokens based on n_keep setting
-    if (data->n_keep != 0) {
-        data->cached_tokens = prompt_tokens;
-        data->cached_token_count = n_prompt_tokens;
-
-        // Trim cached tokens if n_keep has a specific limit
-        if (data->n_keep > 0 && data->cached_token_count > data->n_keep) {
-            data->cached_tokens.resize(data->n_keep);
-            data->cached_token_count = data->n_keep;
-        }
-    } else {
-        // n_keep is 0, don't cache tokens
-        data->cached_tokens.clear();
-        data->cached_token_count = 0;
-    }
+    // Update cached tokens to the new prompt tokens
+    data->cached_tokens = prompt_tokens;
+    data->cached_token_count = n_prompt_tokens;
 
     // Process prompt tokens in batches (matching simple-chat.cpp)
     int n_batch = llama_n_batch(data->ctx);
