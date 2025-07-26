@@ -53,7 +53,7 @@ public class SafeShutdownExample {
             gen.topP = 0.95f;
             gen.repeatPenalty = 1.1f;
             gen.repeatLastN = 64;
-            gen.stream = true;
+            //gen.stream = true;
             gen.tokenCallback = token -> {
                 System.out.print(token);
                 System.out.flush();
