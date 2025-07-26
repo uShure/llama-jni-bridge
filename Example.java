@@ -43,7 +43,7 @@ public class Example {
             genParams.topK = 40;           // Top-K sampling
             genParams.topP = 0.95f;        // Top-P sampling
             genParams.repeatPenalty = 1.1f; // Repetition penalty
-            genParams.stream = true;       // Enable streaming
+            // Note: streaming is controlled by tokenCallback presence
 
             // Set up streaming callback
             genParams.tokenCallback = new Predicate<String>() {
