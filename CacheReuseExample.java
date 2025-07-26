@@ -121,7 +121,7 @@ public class CacheReuseExample {
             GenerateParams genParams = new GenerateParams();
             genParams.prompt = "Что такое искусственный интеллект?";
             genParams.nPredict = 128;
-            genParams.stream = true;
+            //genParams.stream = true;
             genParams.tokenCallback = token -> {
                 System.out.print(token);
                 System.out.flush();
