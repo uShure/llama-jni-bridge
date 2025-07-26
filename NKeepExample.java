@@ -73,7 +73,7 @@ public class NKeepExample {
         genParams.prompt = prompt;
         genParams.nPredict = 50;  // Короткие ответы для быстрого теста
         genParams.temp = 0.1f;    // Низкая температура для стабильности
-        genParams.stream = true;
+        //genParams.stream = true;
 
         final StringBuilder response = new StringBuilder();
         genParams.tokenCallback = token -> {
