@@ -391,7 +391,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     float temp = getFloatField(env, generateParams, "temp");
     float repeat_penalty = getFloatField(env, generateParams, "repeatPenalty");
     int repeat_last_n = getIntField(env, generateParams, "repeatLastN");
-    bool stream = getBooleanField(env, generateParams, "stream");
+    // stream field removed - streaming is controlled by tokenCallback presence
     int seed = getIntField(env, generateParams, "seed");
 
     // Get vocab from model
@@ -427,7 +427,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     fprintf(stderr, "repeat_penalty: %.2f\n", repeat_penalty);
     fprintf(stderr, "repeat_last_n: %d\n", repeat_last_n);
     fprintf(stderr, "seed: %d\n", seed);
-    fprintf(stderr, "stream: %s\n", stream ? "true" : "false");
+    // stream parameter removed - streaming controlled by tokenCallback
     fprintf(stderr, "=== End parameters ===\n\n");
 
     // Reset sampler for new generation
@@ -677,8 +677,8 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         response += piece;
         n_generated++;
 
-        // Stream callback
-        if (stream && tokenCallback) {
+        // Stream callback - streaming controlled by tokenCallback presence
+        if (tokenCallback) {
             jstring tokenJStr = env->NewStringUTF(piece.c_str());
             jboolean shouldContinue = env->CallBooleanMethod(tokenCallback, testMethod, tokenJStr);
             env->DeleteLocalRef(tokenJStr);
