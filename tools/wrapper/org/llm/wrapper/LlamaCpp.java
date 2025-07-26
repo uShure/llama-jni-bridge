@@ -32,6 +32,12 @@ public class LlamaCpp {
     public static native long llama_get_native_memory_usage(long handle);
 
     /**
+     * Gets the OS-reported memory usage for the process.
+     * @return Memory usage in bytes, or -1 on error.
+     */
+    public static native long llama_get_os_memory_usage();
+
+    /**
      * Clears the chat history and KV cache for a context.
      * @param handle The handle returned by llama_init.
      */
