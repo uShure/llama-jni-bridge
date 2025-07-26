@@ -70,7 +70,7 @@ public class TestLlama {
                 genParams.topK = 40;
                 genParams.topP = 0.95f;
                 genParams.repeatPenalty = 1.1f;
-                genParams.stream = true;
+                // stream removed - streaming controlled by tokenCallback
 
                 final StringBuilder response = new StringBuilder();
                 genParams.tokenCallback = new Predicate<String>() {
@@ -112,7 +112,7 @@ public class TestLlama {
         genParams.topK = 40;
         genParams.topP = 0.95f;
         genParams.repeatPenalty = 1.1f;
-        genParams.stream = true;
+        // stream removed - streaming controlled by tokenCallback
 
         final int[] tokenCount = {0};
         genParams.tokenCallback = new Predicate<String>() {
@@ -148,7 +148,7 @@ public class TestLlama {
         genParams1.nPredict = 20;
         genParams1.temp = 0.3f;
         genParams1.topK = 10;
-        genParams1.stream = true;
+        // stream removed - streaming controlled by tokenCallback
         genParams1.tokenCallback = token -> {
             System.out.print(token);
             return true;
@@ -163,7 +163,7 @@ public class TestLlama {
         genParams2.nPredict = 20;
         genParams2.temp = 1.5f;
         genParams2.topK = 100;
-        genParams2.stream = true;
+        // stream removed - streaming controlled by tokenCallback
         genParams2.tokenCallback = token -> {
             System.out.print(token);
             return true;
