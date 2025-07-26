@@ -17,7 +17,7 @@ extern "C" {
  * Signature: (Lorg/llm/wrapper/InitParams;)J
  */
 JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
-  (JNIEnv *, jobject, jobject);
+  (JNIEnv *, jclass, jobject);
 
 /*
  * Class:     org_llm_wrapper_LlamaCpp
@@ -25,7 +25,7 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
  * Signature: (J)V
  */
 JNIEXPORT void JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1destroy
-  (JNIEnv *, jobject, jlong);
+  (JNIEnv *, jclass, jlong);
 
 /*
  * Class:     org_llm_wrapper_LlamaCpp
@@ -33,7 +33,7 @@ JNIEXPORT void JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1destroy
  * Signature: (JLorg/llm/wrapper/GenerateParams;)I
  */
 JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
-  (JNIEnv *, jobject, jlong, jobject);
+  (JNIEnv *, jclass, jlong, jobject);
 
 /*
  * Class:     org_llm_wrapper_LlamaCpp
@@ -50,6 +50,14 @@ JNIEXPORT jstring JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1get_1error
  */
 JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1get_1native_1memory_1usage
   (JNIEnv *, jclass, jlong);
+
+/*
+ * Class:     org_llm_wrapper_LlamaCpp
+ * Method:    llama_get_os_memory_usage
+ * Signature: ()J
+ */
+JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1get_1os_1memory_1usage
+  (JNIEnv *, jclass);
 
 /*
  * Class:     org_llm_wrapper_LlamaCpp
