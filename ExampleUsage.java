@@ -61,7 +61,7 @@ public class ExampleUsage {
             genParams.topP = 0.95f;         // Top-P sampling
             genParams.repeatPenalty = 1.1f; // Repetition penalty
             genParams.repeatLastN = 64;     // Last N tokens for repeat penalty
-            genParams.stream = true;        // Enable streaming
+            //genParams.stream = true;        // Enable streaming
             genParams.seed = -1;            // Random seed
 
             // Token callback for streaming output
