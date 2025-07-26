@@ -92,7 +92,7 @@ public class BenchmarkLlama {
         genParams.temp = 0.8f;
         genParams.topK = 40;
         genParams.topP = 0.95f;
-        genParams.stream = false;
+        //genParams.stream = false;
 
         final int[] tokenCount = {0};
         genParams.tokenCallback = new Predicate<String>() {
