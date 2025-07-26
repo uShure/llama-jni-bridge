@@ -44,7 +44,7 @@ public class BatchExample {
             gen.temp = 0.7f;
             gen.topK = 40;
             gen.topP = 0.9f;
-            gen.stream = true;
+            //gen.stream = true;
             gen.tokenCallback = token -> {
                 System.out.print(token);
                 System.out.flush();
