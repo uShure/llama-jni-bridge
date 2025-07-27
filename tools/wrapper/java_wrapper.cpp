@@ -284,7 +284,11 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     // === Cache Configuration ===
     int cache_type_k = getIntField(env, initParams, "cacheTypeK");
     int cache_type_v = getIntField(env, initParams, "cacheTypeV");
+    int cache_type_k_draft = getIntField(env, initParams, "cacheTypeKDraft");
+    int cache_type_v_draft = getIntField(env, initParams, "cacheTypeVDraft");
     float defrag_threshold = getFloatField(env, initParams, "defragThreshold");
+
+    // TODO: Apply cache_type_k_draft and cache_type_v_draft when draft model support is added
 
     // === NUMA Configuration ===
     int numa_mode = getIntField(env, initParams, "numa");
@@ -513,6 +517,9 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     int grp_attn_n = getIntField(env, generateParams, "grpAttnN");
     int grp_attn_w = getIntField(env, generateParams, "grpAttnW");
 
+    // === Plain Text Mode ===
+    bool chat_mode = getBooleanField(env, generateParams, "chatMode");
+
     // Get vocab from model
     const struct llama_vocab * vocab = llama_model_get_vocab(data->model);
 
@@ -642,55 +649,71 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         llama_sampler_chain_add(data->sampler, llama_sampler_init_dist(actual_seed));
     }
 
-    // Get chat template
-    const char * tmpl = llama_model_chat_template(data->model, nullptr);
+    std::string complete_prompt;
 
-    // Add user message to chat history
-    data->chat_messages.push_back({"user", strdup(user_input.c_str())});
+    if (chat_mode) {
+        // Chat mode - use history and templates
+        // Get chat template
+        const char * tmpl = llama_model_chat_template(data->model, nullptr);
 
-    // Format ALL messages with chat template to get complete prompt
-    if (data->formatted_chat.empty()) {
-        data->formatted_chat.resize(data->n_ctx * 4);
-    }
+        // Add user message to chat history
+        data->chat_messages.push_back({"user", strdup(user_input.c_str())});
 
-    int new_len;
-    if (tmpl == nullptr) {
-        // No template found - use simple format
-        fprintf(stderr, "No chat template found, using simple format\n");
-
-        // Build complete conversation
-        std::string complete_prompt;
-        for (size_t i = 0; i < data->chat_messages.size(); i++) {
-            if (i > 0) complete_prompt += "\n";
-            complete_prompt += data->chat_messages[i].content;
+        // Format ALL messages with chat template to get complete prompt
+        if (data->formatted_chat.empty()) {
+            data->formatted_chat.resize(data->n_ctx * 4);
         }
 
-        new_len = snprintf(data->formatted_chat.data(), data->formatted_chat.size(),
-                         "%s", complete_prompt.c_str());
-    } else {
-        // Use the model's chat template
-        new_len = llama_chat_apply_template(tmpl, data->chat_messages.data(),
-                                           data->chat_messages.size(), true,
-                                           data->formatted_chat.data(), data->formatted_chat.size());
+        int new_len;
+        if (tmpl == nullptr) {
+            // No template found - use simple format
+            fprintf(stderr, "No chat template found, using simple format\n");
 
-        if (new_len > (int)data->formatted_chat.size()) {
-            data->formatted_chat.resize(new_len * 2);
+            // Build complete conversation
+            for (size_t i = 0; i < data->chat_messages.size(); i++) {
+                if (i > 0) complete_prompt += "\n";
+                complete_prompt += data->chat_messages[i].content;
+            }
+
+            new_len = complete_prompt.length();
+            if (new_len > (int)data->formatted_chat.size()) {
+                data->formatted_chat.resize(new_len * 2);
+            }
+            memcpy(data->formatted_chat.data(), complete_prompt.c_str(), new_len);
+        } else {
+            // Use the model's chat template
             new_len = llama_chat_apply_template(tmpl, data->chat_messages.data(),
-                                              data->chat_messages.size(), true,
-                                              data->formatted_chat.data(), data->formatted_chat.size());
+                                               data->chat_messages.size(), true,
+                                               data->formatted_chat.data(), data->formatted_chat.size());
+
+            if (new_len > (int)data->formatted_chat.size()) {
+                data->formatted_chat.resize(new_len * 2);
+                new_len = llama_chat_apply_template(tmpl, data->chat_messages.data(),
+                                                  data->chat_messages.size(), true,
+                                                  data->formatted_chat.data(), data->formatted_chat.size());
+            }
         }
-    }
 
-    if (new_len < 0) {
-        env->ReleaseStringUTFChars(prompt_jstr, prompt_cstr);
-        set_last_error("Failed to apply chat template");
-        return -1;
-    }
+        if (new_len < 0) {
+            env->ReleaseStringUTFChars(prompt_jstr, prompt_cstr);
+            set_last_error("Failed to apply chat template");
+            return -1;
+        }
 
-    // Get the COMPLETE prompt
-    std::string complete_prompt(data->formatted_chat.begin(), data->formatted_chat.begin() + new_len);
+        // Get the COMPLETE prompt from formatted chat
+        complete_prompt = std::string(data->formatted_chat.begin(), data->formatted_chat.begin() + new_len);
+    } else {
+        // Plain text mode - use prompt as is, no history, no templates
+        complete_prompt = user_input;
+        fprintf(stderr, "Using plain text mode\n");
+    }
 
     env->ReleaseStringUTFChars(prompt_jstr, prompt_cstr);
+
+    // Log prompt for debugging
+    fprintf(stderr, "\n=== PROMPT BEFORE TOKENIZATION ===\n");
+    fprintf(stderr, "%s\n", complete_prompt.c_str());
+    fprintf(stderr, "=== END PROMPT ===\n\n");
 
     // Tokenize the COMPLETE prompt
     const int n_prompt_tokens = -llama_tokenize(vocab, complete_prompt.c_str(), complete_prompt.size(),
@@ -838,8 +861,10 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         data->n_past += batch.n_tokens;
     }
 
-    // Add the response to the messages
-    data->chat_messages.push_back({"assistant", strdup(response.c_str())});
+    // Add the response to the messages only in chat mode
+    if (chat_mode) {
+        data->chat_messages.push_back({"assistant", strdup(response.c_str())});
+    }
 
     fprintf(stderr, "\n=== Generation complete ===\n");
     fprintf(stderr, "Generated %d tokens\n", n_generated);
