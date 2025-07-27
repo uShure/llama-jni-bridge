@@ -40,7 +40,7 @@ public class InitParams {
     public int nGpuLayers = 0;             // Layers to offload to GPU
     public int splitMode = 0;              // 0=none, 1=layer, 2=row
     public String tensorSplit = "";        // Tensor split ratios (e.g., "3,1")
-    public int mainGpu = 0;                // Main GPU index
+    public int mainGpu = -1;               // Main GPU index (-1 = default device)
     public String device = "";             // Comma-separated device list
     public String overrideTensor = "";     // Override tensor buffer types
 
