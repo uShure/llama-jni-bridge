@@ -8,7 +8,7 @@ import java.util.function.Predicate;
 public class GenerateParams {
     // === Required Parameters ===
     public String prompt;                         // Input prompt
-    public int nPredict = -1;                    // Tokens to predict (-1=inf, -2=fill context)
+    public int nPredict = 128;                   // Tokens to predict (default: 128, -1=inf, -2=fill context)
     public String file = "";                     // File containing prompt
     public String binaryFile = "";               // Binary file containing prompt
 
@@ -90,6 +90,9 @@ public class GenerateParams {
     public boolean multiline = false;            // Enable multiline input
     public boolean useConversation = false;      // Legacy conversation flag
     public boolean addAssistant = true;          // Add assistant message
+
+    // === Plain Text Mode ===
+    public boolean chatMode = true;              // true = chat with history/templates, false = plain text mode
 
     // === Special Tokens ===
     public String bosToken = "";                 // Beginning-of-sequence token
