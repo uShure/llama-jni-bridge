@@ -95,8 +95,6 @@ public class InitParams {
     public String draftModel = "";         // Path to draft model
     public int nDraft = 8;                 // Tokens to draft
     public float pSplit = 0.1f;            // Speculative decoding split probability
-    public int cacheTypeKDraft = 1;        // Draft model K cache type (1=f16)
-    public int cacheTypeVDraft = 1;        // Draft model V cache type (1=f16)
 
     // === Quantization ===
     public boolean quantizeOutputTensor = false;
