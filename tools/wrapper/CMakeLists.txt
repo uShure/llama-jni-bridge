@@ -61,6 +61,23 @@ if(BUILD_WRAPPER_TEST)
     )
 
     install(TARGETS wrapper_test RUNTIME)
+
+    # Only add parameter_test if the source file exists
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/ParameterTestMain.cpp)
+        add_executable(parameter_test ParameterTestMain.cpp)
+
+        target_include_directories(parameter_test PRIVATE
+            ../../include
+            ../../common
+        )
+
+        target_link_libraries(parameter_test PRIVATE
+            llama
+            common
+        )
+
+        install(TARGETS parameter_test RUNTIME)
+    endif()
 endif()
 
 # Compile Java classes
