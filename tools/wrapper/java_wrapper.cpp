@@ -9,6 +9,7 @@
 #include <memory>
 #include <thread>
 #include <cstring>
+#include <sstream>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -207,37 +208,93 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     }
 
     // Extract ALL parameters from InitParams
+
+    // === Threading and CPU Configuration ===
+    int n_threads = getIntField(env, initParams, "nThreads");
+    data->params.cpuparams.n_threads = (n_threads == -1) ? std::thread::hardware_concurrency() : n_threads;
+
+    int n_threads_batch = getIntField(env, initParams, "nThreadsBatch");
+    data->params.cpuparams_batch.n_threads = (n_threads_batch == -1) ? data->params.cpuparams.n_threads : n_threads_batch;
+
+    // TODO: CPU affinity parameters (cpuMask, cpuRange, etc.) - requires platform-specific code
+
+    // === Context and Batch Configuration ===
     data->params.n_ctx = getIntField(env, initParams, "nCtx");
     data->params.n_batch = getIntField(env, initParams, "nBatch");
     data->params.n_ubatch = getIntField(env, initParams, "nUBatch");
-    data->params.cpuparams.n_threads = getIntField(env, initParams, "nThreads");
-    data->params.cpuparams_batch.n_threads = getIntField(env, initParams, "nThreadsBatch");
 
     // Match simple-chat.cpp: if n_batch is 0, set it to n_ctx
     if (data->params.n_batch == 0) {
         data->params.n_batch = data->params.n_ctx;
     }
 
-    int n_gpu_layers = getIntField(env, initParams, "nGpuLayers");
-    int seed = getIntField(env, initParams, "seed");
+    // Cache reuse parameter
+    data->n_keep = getIntField(env, initParams, "nKeep");
+    bool swa_full = getBooleanField(env, initParams, "swaFull");
+
+    // === Model Loading Parameters ===
     bool use_mmap = getBooleanField(env, initParams, "useMmap");
     bool use_mlock = getBooleanField(env, initParams, "useMlock");
+    bool check_tensors = getBooleanField(env, initParams, "checkTensors");
     bool embeddings_mode = getBooleanField(env, initParams, "embeddings");
+
+    // === GPU Configuration ===
+    int n_gpu_layers = getIntField(env, initParams, "nGpuLayers");
+    int split_mode = getIntField(env, initParams, "splitMode");
+    int main_gpu = getIntField(env, initParams, "mainGpu");
+
+    // Parse tensor split string
+    jstring tensor_split_str = getStringField(env, initParams, "tensorSplit");
+    std::vector<float> tensor_split_vec;
+    if (tensor_split_str) {
+        const char* splits_cstr = env->GetStringUTFChars(tensor_split_str, nullptr);
+        if (splits_cstr && strlen(splits_cstr) > 0) {
+            std::stringstream ss(splits_cstr);
+            std::string token;
+            while (std::getline(ss, token, ',')) {
+                try {
+                    tensor_split_vec.push_back(std::stof(token));
+                } catch (...) {
+                    // Ignore invalid values
+                }
+            }
+        }
+        env->ReleaseStringUTFChars(tensor_split_str, splits_cstr);
+    }
+
+    // === Performance Features ===
     bool flash_attn = getBooleanField(env, initParams, "flashAttn");
     bool no_kv_offload = getBooleanField(env, initParams, "noKVOffload");
+    bool no_op_offload = getBooleanField(env, initParams, "noOpOffload");
+    bool no_perf = getBooleanField(env, initParams, "noPerf");
 
-    // Get cache type parameters
+    // === RoPE Configuration ===
+    int rope_scaling_type = getIntField(env, initParams, "ropeScalingType");
+    float rope_scale = getFloatField(env, initParams, "ropeScale");
+    float rope_freq_base = getFloatField(env, initParams, "ropeFreqBase");
+    float rope_freq_scale = getFloatField(env, initParams, "ropeFreqScale");
+
+    // === YaRN Parameters ===
+    int yarn_orig_ctx = getIntField(env, initParams, "yarnOrigCtx");
+    float yarn_ext_factor = getFloatField(env, initParams, "yarnExtFactor");
+    float yarn_attn_factor = getFloatField(env, initParams, "yarnAttnFactor");
+    float yarn_beta_slow = getFloatField(env, initParams, "yarnBetaSlow");
+    float yarn_beta_fast = getFloatField(env, initParams, "yarnBetaFast");
+
+    // === Cache Configuration ===
     int cache_type_k = getIntField(env, initParams, "cacheTypeK");
     int cache_type_v = getIntField(env, initParams, "cacheTypeV");
+    float defrag_threshold = getFloatField(env, initParams, "defragThreshold");
+
+    // === NUMA Configuration ===
+    int numa_mode = getIntField(env, initParams, "numa");
+
+    // === Escape processing ===
     bool no_escape = getBooleanField(env, initParams, "noEscape");
-
-    // Get n_keep parameter for cache reuse
-    data->n_keep = getIntField(env, initParams, "nKeep");
-
-    // Set escape processing based on noEscape flag
     data->params.escape = !no_escape;
 
-    // Set seed properly - only use LLAMA_DEFAULT_SEED if seed is explicitly -1
+    // === Sampling seed ===
+    int seed = getIntField(env, initParams, "seed");
     data->params.sampling.seed = (seed == -1) ? LLAMA_DEFAULT_SEED : seed;
 
     data->n_ctx = data->params.n_ctx;
@@ -247,21 +304,14 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     model_params.n_gpu_layers = n_gpu_layers;
     model_params.use_mmap = use_mmap;
     model_params.use_mlock = use_mlock;
-
-    // Get additional model parameters
-    int main_gpu = getIntField(env, initParams, "mainGpu");
+    model_params.check_tensors = check_tensors;
     model_params.main_gpu = main_gpu;
+    model_params.split_mode = (llama_split_mode)split_mode;
 
-    // Handle tensor splits if provided
-    jfloatArray tensorSplits = getFloatArrayField(env, initParams, "tensorSplits");
-    if (tensorSplits != nullptr) {
-        jsize splitCount = env->GetArrayLength(tensorSplits);
-        if (splitCount > 0) {
-            jfloat* splits = env->GetFloatArrayElements(tensorSplits, nullptr);
-            // Note: Can't modify const tensor_split in newer API
-            // This would need to be handled differently in newer llama.cpp versions
-            env->ReleaseFloatArrayElements(tensorSplits, splits, JNI_ABORT);
-        }
+    // Apply tensor splits if provided
+    if (!tensor_split_vec.empty() && tensor_split_vec.size() <= LLAMA_MAX_DEVICES) {
+        // Note: The tensor_split field is const in newer API
+        // Would need custom handling based on llama.cpp version
     }
 
     data->model = llama_model_load_from_file(modelPath_cstr, model_params);
@@ -282,18 +332,29 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     ctx_params.n_threads_batch = data->params.cpuparams_batch.n_threads;
     ctx_params.embeddings = embeddings_mode;
     ctx_params.flash_attn = flash_attn;
-    ctx_params.no_perf = false;
+    ctx_params.no_perf = no_perf;
     ctx_params.type_k = (ggml_type)cache_type_k;
     ctx_params.type_v = (ggml_type)cache_type_v;
+    ctx_params.offload_kqv = !no_kv_offload;
+    ctx_params.op_offload = !no_op_offload;
+    ctx_params.swa_full = swa_full;
 
-    // Get additional context parameters
-    float defrag_threshold = getFloatField(env, initParams, "defragThreshold");
-    if (defrag_threshold > 0) {
+    // RoPE configuration
+    ctx_params.rope_scaling_type = (llama_rope_scaling_type)rope_scaling_type;
+    if (rope_freq_base > 0) ctx_params.rope_freq_base = rope_freq_base;
+    if (rope_freq_scale > 0) ctx_params.rope_freq_scale = rope_freq_scale;
+
+    // YaRN configuration
+    if (yarn_ext_factor >= 0) ctx_params.yarn_ext_factor = yarn_ext_factor;
+    ctx_params.yarn_attn_factor = yarn_attn_factor;
+    ctx_params.yarn_beta_slow = yarn_beta_slow;
+    ctx_params.yarn_beta_fast = yarn_beta_fast;
+    if (yarn_orig_ctx > 0) ctx_params.yarn_orig_ctx = yarn_orig_ctx;
+
+    // Defragmentation threshold
+    if (defrag_threshold >= 0) {
         ctx_params.defrag_thold = defrag_threshold;
     }
-
-    // No KV offload parameter
-    ctx_params.offload_kqv = !no_kv_offload;
 
     data->ctx = llama_init_from_model(data->model, ctx_params);
     if (!data->ctx) {
@@ -301,6 +362,17 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
         set_last_error("Failed to create context from model");
         llama_model_free(data->model);
         return 0;
+    }
+
+    // Apply NUMA configuration if requested
+    if (numa_mode > 0) {
+        ggml_numa_strategy numa_strategy = GGML_NUMA_STRATEGY_DISABLED;
+        switch (numa_mode) {
+            case 1: numa_strategy = GGML_NUMA_STRATEGY_DISTRIBUTE; break;
+            case 2: numa_strategy = GGML_NUMA_STRATEGY_ISOLATE; break;
+            case 3: numa_strategy = GGML_NUMA_STRATEGY_NUMACTL; break;
+        }
+        llama_numa_init(numa_strategy);
     }
 
     // Initialize sampler - will be recreated in generate with actual parameters
@@ -360,46 +432,86 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     std::string user_input(prompt_cstr);
 
     // Extract ALL parameters from GenerateParams
-    int n_predict = getIntField(env, generateParams, "nPredict");
 
-    // Basic sampling parameters
+    // === Basic Parameters ===
+    int n_predict = getIntField(env, generateParams, "nPredict");
+    bool escape = getBooleanField(env, generateParams, "escape");
+    bool no_escape = getBooleanField(env, generateParams, "noEscape");
+
+    // === Basic Sampling Parameters ===
     float temp = getFloatField(env, generateParams, "temp");
     int top_k = getIntField(env, generateParams, "topK");
     float top_p = getFloatField(env, generateParams, "topP");
     float min_p = getFloatField(env, generateParams, "minP");
     float tfs_z = getFloatField(env, generateParams, "tfsZ");
     float typical_p = getFloatField(env, generateParams, "typicalP");
+    float top_nsigma = getFloatField(env, generateParams, "topNsigma");
     int seed = getIntField(env, generateParams, "seed");
 
-    // Repetition penalty parameters
+    // === Repetition Penalty Parameters ===
     float repeat_penalty = getFloatField(env, generateParams, "repeatPenalty");
     int repeat_last_n = getIntField(env, generateParams, "repeatLastN");
     float frequency_penalty = getFloatField(env, generateParams, "frequencyPenalty");
     float presence_penalty = getFloatField(env, generateParams, "presencePenalty");
     bool penalize_nl = getBooleanField(env, generateParams, "penalizeNl");
 
-    // Mirostat parameters
+    // === Mirostat Parameters ===
     int mirostat = getIntField(env, generateParams, "mirostat");
     float mirostat_tau = getFloatField(env, generateParams, "mirostatTau");
     float mirostat_eta = getFloatField(env, generateParams, "mirostatEta");
 
-    // DRY parameters
+    // === DRY Parameters ===
     float dry_multiplier = getFloatField(env, generateParams, "dryMultiplier");
     float dry_base = getFloatField(env, generateParams, "dryBase");
     int dry_allowed_length = getIntField(env, generateParams, "dryAllowedLength");
     int dry_penalty_last_n = getIntField(env, generateParams, "dryPenaltyLastN");
 
-    // XTC parameters
+    // Custom DRY sequence breakers
+    jobjectArray dry_breakers_array = (jobjectArray)env->GetObjectField(generateParams,
+        env->GetFieldID(env->GetObjectClass(generateParams), "drySequenceBreakers", "[Ljava/lang/String;"));
+    std::vector<std::string> dry_breakers_vec;
+    if (dry_breakers_array) {
+        jsize breaker_count = env->GetArrayLength(dry_breakers_array);
+        for (jsize i = 0; i < breaker_count; i++) {
+            jstring breaker = (jstring)env->GetObjectArrayElement(dry_breakers_array, i);
+            if (breaker) {
+                const char* breaker_cstr = env->GetStringUTFChars(breaker, nullptr);
+                dry_breakers_vec.push_back(breaker_cstr);
+                env->ReleaseStringUTFChars(breaker, breaker_cstr);
+            }
+        }
+    }
+
+    // === XTC Parameters ===
     float xtc_threshold = getFloatField(env, generateParams, "xtcThreshold");
     float xtc_probability = getFloatField(env, generateParams, "xtcProbability");
+    int xtc_min = getIntField(env, generateParams, "xtcMin");
 
-    // Dynamic temperature
+    // === Dynamic Temperature ===
     float dyn_temp_range = getFloatField(env, generateParams, "dynTempRange");
     float dyn_temp_exponent = getFloatField(env, generateParams, "dynTempExponent");
 
-    // Other parameters
+    // === Grammar and Constraints ===
+    jstring grammar_str = getStringField(env, generateParams, "grammar");
+    std::string grammar;
+    if (grammar_str) {
+        const char* grammar_cstr = env->GetStringUTFChars(grammar_str, nullptr);
+        grammar = grammar_cstr;
+        env->ReleaseStringUTFChars(grammar_str, grammar_cstr);
+    }
+
+    // === Token Control ===
     int keep = getIntField(env, generateParams, "keep");
     bool ignore_eos = getBooleanField(env, generateParams, "ignoreEos");
+    bool no_context_shift = getBooleanField(env, generateParams, "noContextShift");
+
+    // === Output Control ===
+    int n_probs = getIntField(env, generateParams, "nProbs");
+    int min_keep = getIntField(env, generateParams, "minKeep");
+
+    // === Group Attention ===
+    int grp_attn_n = getIntField(env, generateParams, "grpAttnN");
+    int grp_attn_w = getIntField(env, generateParams, "grpAttnW");
 
     // Get vocab from model
     const struct llama_vocab * vocab = llama_model_get_vocab(data->model);
@@ -437,8 +549,17 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
 
     // Add DRY sampler if enabled
     if (dry_multiplier > 0.0f) {
-        const char* dry_breakers[] = {"\n", "###", "\\n"};
-        size_t num_breakers = 3;
+        std::vector<const char*> dry_breakers;
+
+        // Use custom breakers if provided, otherwise use defaults
+        if (!dry_breakers_vec.empty()) {
+            for (const auto& breaker : dry_breakers_vec) {
+                dry_breakers.push_back(breaker.c_str());
+            }
+        } else {
+            // Default breakers
+            dry_breakers = {"\n", "###", "\\n", ":", "\"", "*"};
+        }
 
         // Get n_ctx_train from model
         int32_t n_ctx_train = llama_model_n_ctx_train(data->model);
@@ -446,7 +567,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         llama_sampler_chain_add(data->sampler,
             llama_sampler_init_dry(vocab, n_ctx_train, dry_multiplier, dry_base,
                                  dry_allowed_length, dry_penalty_last_n,
-                                 dry_breakers, num_breakers));
+                                 dry_breakers.data(), dry_breakers.size()));
     }
 
     // Add samplers in the correct order (matching llama-cli)
@@ -462,6 +583,11 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
                 frequency_penalty,
                 presence_penalty
             ));
+    }
+
+    // Top-n-sigma sampling
+    if (top_nsigma > 0.0f) {
+        llama_sampler_chain_add(data->sampler, llama_sampler_init_top_n_sigma(top_nsigma));
     }
 
     // Top-K sampling
@@ -481,12 +607,12 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
 
     // Top-P sampling
     if (top_p < 1.0f) {
-        llama_sampler_chain_add(data->sampler, llama_sampler_init_top_p(top_p, 1));
+        llama_sampler_chain_add(data->sampler, llama_sampler_init_top_p(top_p, min_keep > 0 ? min_keep : 1));
     }
 
     // Min-P sampling
     if (min_p > 0.0f) {
-        llama_sampler_chain_add(data->sampler, llama_sampler_init_min_p(min_p, 1));
+        llama_sampler_chain_add(data->sampler, llama_sampler_init_min_p(min_p, min_keep > 0 ? min_keep : 1));
     }
 
     // XTC sampling
