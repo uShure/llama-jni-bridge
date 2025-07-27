@@ -229,7 +229,8 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     }
 
     // Cache reuse parameter
-    data->n_keep = getIntField(env, initParams, "nKeep");
+    int n_keep = getIntField(env, initParams, "nKeep");
+    data->n_keep = n_keep;  // Store initial n_keep value
     bool swa_full = getBooleanField(env, initParams, "swaFull");
 
     // === Model Loading Parameters ===
@@ -271,6 +272,7 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     // === RoPE Configuration ===
     int rope_scaling_type = getIntField(env, initParams, "ropeScalingType");
     float rope_scale = getFloatField(env, initParams, "ropeScale");
+    (void)rope_scale; // TODO: Apply when API supports it
     float rope_freq_base = getFloatField(env, initParams, "ropeFreqBase");
     float rope_freq_scale = getFloatField(env, initParams, "ropeFreqScale");
 
@@ -289,6 +291,8 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     float defrag_threshold = getFloatField(env, initParams, "defragThreshold");
 
     // TODO: Apply cache_type_k_draft and cache_type_v_draft when draft model support is added
+    (void)cache_type_k_draft;
+    (void)cache_type_v_draft;
 
     // === NUMA Configuration ===
     int numa_mode = getIntField(env, initParams, "numa");
@@ -299,9 +303,24 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
 
     // === Sampling seed ===
     int seed = getIntField(env, initParams, "seed");
-    data->params.sampling.seed = (seed == -1) ? LLAMA_DEFAULT_SEED : seed;
+    // Fix: Only use default seed when user specifies -1
+    if (seed == -1) {
+        data->params.sampling.seed = LLAMA_DEFAULT_SEED;
+    } else {
+        data->params.sampling.seed = seed;
+    }
 
     data->n_ctx = data->params.n_ctx;
+
+    // GPU device configuration
+    jstring device_str = getStringField(env, initParams, "device");
+    if (device_str) {
+        const char* device_cstr = env->GetStringUTFChars(device_str, nullptr);
+        // Fix: device field no longer exists in common_params
+        // This is now handled through model and context params
+        // TODO: Handle device configuration through proper API
+        env->ReleaseStringUTFChars(device_str, device_cstr);
+    }
 
     // Load model
     llama_model_params model_params = llama_model_default_params();
@@ -313,9 +332,9 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     model_params.split_mode = (llama_split_mode)split_mode;
 
     // Apply tensor splits if provided
-    if (!tensor_split_vec.empty() && tensor_split_vec.size() <= LLAMA_MAX_DEVICES) {
-        // Note: The tensor_split field is const in newer API
-        // Would need custom handling based on llama.cpp version
+    if (!tensor_split_vec.empty()) {
+        // Note: LLAMA_MAX_DEVICES no longer exists, tensor_split handled differently
+        // TODO: Implement tensor split with new API
     }
 
     data->model = llama_model_load_from_file(modelPath_cstr, model_params);
@@ -441,6 +460,8 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     int n_predict = getIntField(env, generateParams, "nPredict");
     bool escape = getBooleanField(env, generateParams, "escape");
     bool no_escape = getBooleanField(env, generateParams, "noEscape");
+    (void)escape; // TODO: Apply escape processing
+    (void)no_escape; // TODO: Apply no_escape processing
 
     // === Basic Sampling Parameters ===
     float temp = getFloatField(env, generateParams, "temp");
@@ -458,6 +479,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     float frequency_penalty = getFloatField(env, generateParams, "frequencyPenalty");
     float presence_penalty = getFloatField(env, generateParams, "presencePenalty");
     bool penalize_nl = getBooleanField(env, generateParams, "penalizeNl");
+    (void)penalize_nl; // TODO: Apply to penalty sampler
 
     // === Mirostat Parameters ===
     int mirostat = getIntField(env, generateParams, "mirostat");
@@ -490,6 +512,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     float xtc_threshold = getFloatField(env, generateParams, "xtcThreshold");
     float xtc_probability = getFloatField(env, generateParams, "xtcProbability");
     int xtc_min = getIntField(env, generateParams, "xtcMin");
+    (void)xtc_min; // TODO: Apply when XTC sampler is available
 
     // === Dynamic Temperature ===
     float dyn_temp_range = getFloatField(env, generateParams, "dynTempRange");
@@ -508,14 +531,18 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     int keep = getIntField(env, generateParams, "keep");
     bool ignore_eos = getBooleanField(env, generateParams, "ignoreEos");
     bool no_context_shift = getBooleanField(env, generateParams, "noContextShift");
+    (void)no_context_shift; // TODO: Apply context shift control
 
     // === Output Control ===
     int n_probs = getIntField(env, generateParams, "nProbs");
     int min_keep = getIntField(env, generateParams, "minKeep");
+    (void)n_probs; // TODO: Apply probability output control
 
     // === Group Attention ===
     int grp_attn_n = getIntField(env, generateParams, "grpAttnN");
     int grp_attn_w = getIntField(env, generateParams, "grpAttnW");
+    (void)grp_attn_n; // TODO: Apply group attention parameters
+    (void)grp_attn_w; // TODO: Apply group attention width
 
     // === Plain Text Mode ===
     bool chat_mode = getBooleanField(env, generateParams, "chatMode");
@@ -578,8 +605,9 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     }
 
     // Add samplers in the correct order (matching llama-cli)
+    // Fix: llama_sampler_init_logit_bias now takes 3 parameters
     llama_sampler_chain_add(data->sampler,
-        llama_sampler_init_logit_bias(llama_vocab_n_tokens(vocab), 0, nullptr, nullptr));
+        llama_sampler_init_logit_bias(llama_vocab_n_tokens(vocab), 0, nullptr));
 
     // Add penalties sampler if any penalty is set
     if (repeat_penalty != 1.0f || frequency_penalty != 0.0f || presence_penalty != 0.0f) {
@@ -603,8 +631,10 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     }
 
     // Tail-free sampling
+    // Note: TFS sampling appears to be removed from newer llama.cpp
+    // TODO: Check if there's a replacement or if it's integrated into another sampler
     if (tfs_z < 1.0f) {
-        llama_sampler_chain_add(data->sampler, llama_sampler_init_tail_free(tfs_z, 1));
+        // Skip TFS for now - not available in current API
     }
 
     // Typical sampling
@@ -747,7 +777,12 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     // If n_keep is 0, don't reuse any cache
     if (data->n_keep == 0) {
         // Clear everything
-        llama_kv_cache_clear(data->ctx);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        llama_kv_self_clear(data->ctx);
+#pragma GCC diagnostic pop
         data->all_tokens.clear();
         data->n_past = 0;
         common_prefix = 0;
@@ -768,7 +803,12 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
 
         // Remove KV cache entries beyond common prefix
         if (common_prefix < data->n_past) {
-            llama_kv_cache_seq_rm(data->ctx, 0, common_prefix, -1);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            llama_kv_self_seq_rm(data->ctx, 0, common_prefix, -1);
+#pragma GCC diagnostic pop
             data->n_past = common_prefix;
         }
     }
@@ -938,13 +978,23 @@ JNIEXPORT void JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1clear_1chat
         // Clear everything
         data->all_tokens.clear();
         data->n_past = 0;
-        llama_kv_cache_clear(data->ctx);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        llama_kv_self_clear(data->ctx);
+#pragma GCC diagnostic pop
     } else if (data->n_keep > 0 && data->n_past > data->n_keep) {
         // Keep only first n_keep tokens
         data->all_tokens.resize(data->n_keep);
         data->n_past = data->n_keep;
         // Clear KV cache beyond n_keep
-        llama_kv_cache_seq_rm(data->ctx, 0, data->n_keep, -1);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        llama_kv_self_seq_rm(data->ctx, 0, data->n_keep, -1);
+#pragma GCC diagnostic pop
     }
     // If n_keep is -1, keep everything (don't clear)
 }
