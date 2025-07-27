@@ -437,22 +437,21 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
 
     // Add DRY sampler if enabled
     if (dry_multiplier > 0.0f) {
-        std::vector<std::string> dry_breakers_strs;
-        // TODO: Get dry sequence breakers from Java if needed
-        // For now use default breakers
-        dry_breakers_strs.push_back("\n");
-        dry_breakers_strs.push_back("###");
-        dry_breakers_strs.push_back("\\n");
+        const char* dry_breakers[] = {"\n", "###", "\\n"};
+        size_t num_breakers = 3;
+
+        // Get n_ctx_train from model
+        int32_t n_ctx_train = llama_model_n_ctx_train(data->model);
 
         llama_sampler_chain_add(data->sampler,
-            llama_sampler_init_dry(vocab, dry_multiplier, dry_base,
+            llama_sampler_init_dry(vocab, n_ctx_train, dry_multiplier, dry_base,
                                  dry_allowed_length, dry_penalty_last_n,
-                                 dry_breakers_strs));
+                                 dry_breakers, num_breakers));
     }
 
     // Add samplers in the correct order (matching llama-cli)
     llama_sampler_chain_add(data->sampler,
-        llama_sampler_init_logit_bias(vocab, 0, nullptr, nullptr));
+        llama_sampler_init_logit_bias(llama_vocab_n_tokens(vocab), 0, nullptr, nullptr));
 
     // Add penalties sampler if any penalty is set
     if (repeat_penalty != 1.0f || frequency_penalty != 0.0f || presence_penalty != 0.0f) {
@@ -507,7 +506,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     // Mirostat sampling (replaces temperature)
     if (mirostat == 1) {
         llama_sampler_chain_add(data->sampler,
-            llama_sampler_init_mirostat(llama_n_vocab(data->model), seed, mirostat_tau, mirostat_eta, 100));
+            llama_sampler_init_mirostat(llama_vocab_n_tokens(vocab), seed, mirostat_tau, mirostat_eta, 100));
     } else if (mirostat == 2) {
         llama_sampler_chain_add(data->sampler,
             llama_sampler_init_mirostat_v2(seed, mirostat_tau, mirostat_eta));
