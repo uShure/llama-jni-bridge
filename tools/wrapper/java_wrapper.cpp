@@ -918,8 +918,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
             batch.token[j] = prompt_tokens[i + j];
             batch.pos[j] = i + j;  // Position from start of sequence
             batch.n_seq_id[j] = 1;
-            batch.seq_id[j] = (llama_seq_id *)malloc(sizeof(llama_seq_id));
-            batch.seq_id[j][0] = 0;
+            batch.seq_id[j][0] = 0;  // seq_id already allocated by llama_batch_init
             batch.logits[j] = 0;
         }
         batch.logits[batch_size - 1] = 1;  // Only need logits for last token in batch
@@ -933,10 +932,6 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
 
         int ret = llama_decode(data->ctx, batch);
 
-        // Free seq_id arrays
-        for (int j = 0; j < batch_size; j++) {
-            free(batch.seq_id[j]);
-        }
         llama_batch_free(batch);
 
         if (ret != 0) {
@@ -992,8 +987,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         batch.token[0] = new_token_id;
         batch.pos[0] = data->n_past;  // Critical: position is current KV cache size
         batch.n_seq_id[0] = 1;
-        batch.seq_id[0] = (llama_seq_id *)malloc(sizeof(llama_seq_id));
-        batch.seq_id[0][0] = 0;
+        batch.seq_id[0][0] = 0;  // seq_id already allocated by llama_batch_init
         batch.logits[0] = 1;
 
         if (data->n_past + batch.n_tokens > n_ctx) {
@@ -1005,7 +999,6 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         }
 
         int ret = llama_decode(data->ctx, batch);
-        free(batch.seq_id[0]);
         llama_batch_free(batch);
 
         if (ret != 0) {
