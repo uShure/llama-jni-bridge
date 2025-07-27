@@ -42,6 +42,9 @@ struct LlamaContextData {
     std::vector<llama_token> all_tokens;  // All tokens ever processed
     int n_past = 0;  // Number of tokens in KV cache
     int n_keep = 0;  // Number of tokens to keep from initial prompt
+
+    // For proper caching in plain text mode
+    std::string last_prompt;  // Track previous prompt to detect continuations
 };
 
 // --- Globals for safe resource management ---
@@ -745,6 +748,24 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     fprintf(stderr, "%s\n", complete_prompt.c_str());
     fprintf(stderr, "=== END PROMPT ===\n\n");
 
+    // Check if this is a continuation of the previous prompt (for caching)
+    bool is_continuation = false;
+    if (!chat_mode && !data->last_prompt.empty()) {
+        // In plain text mode, check if new prompt starts with the old one
+        if (complete_prompt.size() > data->last_prompt.size() &&
+            complete_prompt.substr(0, data->last_prompt.size()) == data->last_prompt) {
+            is_continuation = true;
+            fprintf(stderr, "\n=== Detected prompt continuation ===\n");
+            fprintf(stderr, "Previous prompt size: %zu chars\n", data->last_prompt.size());
+            fprintf(stderr, "New prompt size: %zu chars\n", complete_prompt.size());
+            fprintf(stderr, "New content: %zu chars\n", complete_prompt.size() - data->last_prompt.size());
+            fprintf(stderr, "===================================\n\n");
+        }
+    }
+
+    // Save current prompt for next time
+    data->last_prompt = complete_prompt;
+
     // Tokenize the COMPLETE prompt
     const int n_prompt_tokens = -llama_tokenize(vocab, complete_prompt.c_str(), complete_prompt.size(),
                                               NULL, 0, true, true);
@@ -777,48 +798,108 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     // If n_keep is 0, don't reuse any cache
     if (data->n_keep == 0) {
         // Clear everything
+#ifdef __GNUC__
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+#ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
         llama_kv_self_clear(data->ctx);
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+#ifdef __GNUC__
 #pragma GCC diagnostic pop
+#endif
         data->all_tokens.clear();
         data->n_past = 0;
         common_prefix = 0;
     } else {
-        // Find common prefix
-        for (int i = 0; i < min_len; i++) {
-            if (data->all_tokens[i] == prompt_tokens[i]) {
-                common_prefix++;
-            } else {
-                break;
+        // Special handling for prompt continuation
+        if (is_continuation && !data->all_tokens.empty()) {
+            // For continuation, the common prefix should be the size of previous tokens
+            common_prefix = (int)data->all_tokens.size();
+
+            // Verify that tokens actually match
+            bool tokens_match = true;
+            for (int i = 0; i < common_prefix && i < n_prompt_tokens; i++) {
+                if (data->all_tokens[i] != prompt_tokens[i]) {
+                    fprintf(stderr, "WARNING: Token mismatch at position %d in continuation\n", i);
+                    tokens_match = false;
+                    common_prefix = i;
+                    break;
+                }
+            }
+
+            if (tokens_match && common_prefix == data->n_past) {
+                // Perfect continuation - don't touch the KV cache!
+                fprintf(stderr, "Perfect continuation detected - keeping full KV cache\n");
+            }
+        } else {
+            // Not a continuation - find common prefix normally
+            for (int i = 0; i < min_len; i++) {
+                if (data->all_tokens[i] == prompt_tokens[i]) {
+                    common_prefix++;
+                } else {
+                    break;
+                }
             }
         }
 
         // Limit by n_keep if specified
-        if (data->n_keep > 0) {
+        if (data->n_keep > 0 && !is_continuation) {
             common_prefix = std::min(common_prefix, data->n_keep);
         }
 
-        // Remove KV cache entries beyond common prefix
+        // Handle KV cache based on common prefix
         if (common_prefix < data->n_past) {
+            // We have more tokens in KV cache than common prefix
+            // This happens after generation - remove only the excess
+            fprintf(stderr, "Adjusting KV cache: n_past=%d -> common_prefix=%d\n",
+                    data->n_past, common_prefix);
+#ifdef __GNUC__
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+#ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            llama_kv_self_seq_rm(data->ctx, 0, common_prefix, -1);
+#endif
+            llama_kv_self_seq_rm(data->ctx, 0, common_prefix, data->n_past);
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+#ifdef __GNUC__
 #pragma GCC diagnostic pop
+#endif
             data->n_past = common_prefix;
         }
     }
 
     fprintf(stderr, "Common prefix: %d tokens\n", common_prefix);
     fprintf(stderr, "Tokens to process: %d\n", n_prompt_tokens - common_prefix);
+    fprintf(stderr, "n_past: %d, all_tokens.size: %zu\n", data->n_past, data->all_tokens.size());
     fprintf(stderr, "=== End token processing ===\n");
 
-    // Update stored tokens
-    data->all_tokens = prompt_tokens;
+    // Update stored tokens based on common prefix
+    if (common_prefix > 0 && !data->all_tokens.empty()) {
+        // We have a common prefix - keep it and update the rest
+        if (common_prefix < (int)data->all_tokens.size()) {
+            // Truncate to common prefix
+            data->all_tokens.resize(common_prefix);
+        }
+        // Append new tokens after common prefix
+        if (common_prefix < n_prompt_tokens) {
+            data->all_tokens.insert(data->all_tokens.end(),
+                                  prompt_tokens.begin() + common_prefix,
+                                  prompt_tokens.end());
+        }
+    } else {
+        // No common prefix or no previous tokens - replace all
+        data->all_tokens = prompt_tokens;
+    }
 
     // Process new tokens in batches
     int n_batch = llama_n_batch(data->ctx);
@@ -828,21 +909,42 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     // Process only new tokens (from common_prefix to end)
     for (int i = common_prefix; i < n_prompt_tokens; i += n_batch) {
         int batch_size = std::min(n_batch, n_prompt_tokens - i);
-        llama_batch batch = llama_batch_get_one(prompt_tokens.data() + i, batch_size);
+
+        // Create batch with proper positions for caching
+        llama_batch batch = llama_batch_init(batch_size, 0, 1);
+        batch.n_tokens = batch_size;
+
+        for (int j = 0; j < batch_size; j++) {
+            batch.token[j] = prompt_tokens[i + j];
+            batch.pos[j] = i + j;  // Position from start of sequence
+            batch.n_seq_id[j] = 1;
+            batch.seq_id[j] = (llama_seq_id *)malloc(sizeof(llama_seq_id));
+            batch.seq_id[j][0] = 0;
+            batch.logits[j] = 0;
+        }
+        batch.logits[batch_size - 1] = 1;  // Only need logits for last token in batch
 
         if (data->n_past + batch.n_tokens > n_ctx) {
             fprintf(stderr, "context size exceeded\n");
             set_last_error("Context size exceeded");
+            llama_batch_free(batch);
             return -1;
         }
 
         int ret = llama_decode(data->ctx, batch);
+
+        // Free seq_id arrays
+        for (int j = 0; j < batch_size; j++) {
+            free(batch.seq_id[j]);
+        }
+        llama_batch_free(batch);
+
         if (ret != 0) {
             set_last_error("Failed to decode prompt batch, ret = " + std::to_string(ret));
             return -1;
         }
 
-        data->n_past += batch.n_tokens;
+        data->n_past += batch_size;
     }
 
     // Now generate the response token by token
@@ -884,15 +986,28 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         }
 
         // Prepare the next batch with the sampled token
-        llama_batch batch = llama_batch_get_one(&new_token_id, 1);
+        // Create batch with proper position
+        llama_batch batch = llama_batch_init(1, 0, 1);
+        batch.n_tokens = 1;
+        batch.token[0] = new_token_id;
+        batch.pos[0] = data->n_past;  // Critical: position is current KV cache size
+        batch.n_seq_id[0] = 1;
+        batch.seq_id[0] = (llama_seq_id *)malloc(sizeof(llama_seq_id));
+        batch.seq_id[0][0] = 0;
+        batch.logits[0] = 1;
 
         if (data->n_past + batch.n_tokens > n_ctx) {
             fprintf(stderr, "context size exceeded\n");
             set_last_error("Context size exceeded");
+            free(batch.seq_id[0]);
+            llama_batch_free(batch);
             break;
         }
 
         int ret = llama_decode(data->ctx, batch);
+        free(batch.seq_id[0]);
+        llama_batch_free(batch);
+
         if (ret != 0) {
             set_last_error("Failed to decode, ret = " + std::to_string(ret));
             break;
@@ -904,6 +1019,10 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     // Add the response to the messages only in chat mode
     if (chat_mode) {
         data->chat_messages.push_back({"assistant", strdup(response.c_str())});
+    } else {
+        // In plain text mode, DON'T include the response in last_prompt
+        // This allows the next call with the same base context to be detected as continuation
+        // data->last_prompt is already set to complete_prompt above
     }
 
     fprintf(stderr, "\n=== Generation complete ===\n");
@@ -978,27 +1097,41 @@ JNIEXPORT void JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1clear_1chat
         // Clear everything
         data->all_tokens.clear();
         data->n_past = 0;
+#ifdef __GNUC__
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+#ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
         llama_kv_self_clear(data->ctx);
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+#ifdef __GNUC__
 #pragma GCC diagnostic pop
+#endif
     } else if (data->n_keep > 0 && data->n_past > data->n_keep) {
         // Keep only first n_keep tokens
         data->all_tokens.resize(data->n_keep);
         data->n_past = data->n_keep;
         // Clear KV cache beyond n_keep
+#ifdef __GNUC__
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+#ifdef __clang__
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
         llama_kv_self_seq_rm(data->ctx, 0, data->n_keep, -1);
-#pragma GCC diagnostic pop
-    }
-    // If n_keep is -1, keep everything (don't clear)
-}
-
 #ifdef __clang__
 #pragma clang diagnostic pop
 #endif
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif
+    }
+    // If n_keep is -1, keep everything (don't clear)
+}
