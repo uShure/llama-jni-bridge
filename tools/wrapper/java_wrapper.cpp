@@ -36,12 +36,11 @@ struct LlamaContextData {
     int n_ctx = 0;
     std::vector<llama_chat_message> chat_messages;  // Store chat history
     std::vector<char> formatted_chat;  // Store formatted chat
-    int prev_len = 0;  // Track previous formatted length
 
-    // Token tracking for cache reuse
-    std::vector<llama_token> cached_tokens;  // Tokens currently in KV cache
-    int cached_token_count = 0;  // Number of valid tokens in cache
-    int n_keep = 0;  // Number of tokens to keep from initial prompt (-1 = all)
+    // Token tracking for proper cache reuse
+    std::vector<llama_token> all_tokens;  // All tokens ever processed
+    int n_past = 0;  // Number of tokens in KV cache
+    int n_keep = 0;  // Number of tokens to keep from initial prompt
 };
 
 // --- Globals for safe resource management ---
@@ -207,38 +206,12 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
         return 0; // Model path is mandatory
     }
 
-    // Extract parameters
+    // Extract ALL parameters from InitParams
     data->params.n_ctx = getIntField(env, initParams, "nCtx");
     data->params.n_batch = getIntField(env, initParams, "nBatch");
+    data->params.n_ubatch = getIntField(env, initParams, "nUBatch");
     data->params.cpuparams.n_threads = getIntField(env, initParams, "nThreads");
     data->params.cpuparams_batch.n_threads = getIntField(env, initParams, "nThreadsBatch");
-
-    // Handle GPU devices properly
-    // Note: The devices parameter might not be directly supported in newer API versions
-    // Instead, GPU usage is typically controlled via n_gpu_layers and tensor_split
-
-    jintArray gpuDevices = getIntArrayField(env, initParams, "gpuDevices");
-    if (gpuDevices != nullptr) {
-        jsize deviceCount = env->GetArrayLength(gpuDevices);
-        if (deviceCount > 0) {
-            jint* devices = env->GetIntArrayElements(gpuDevices, nullptr);
-
-            // Log the requested devices
-            fprintf(stderr, "Requested GPU devices: ");
-            for (jsize i = 0; i < deviceCount; i++) {
-                fprintf(stderr, "%d ", devices[i]);
-            }
-            fprintf(stderr, "\n");
-
-            // Note: In newer llama.cpp, device selection is often automatic
-            // based on n_gpu_layers. The specific device IDs might not be
-            // directly configurable through the context parameters.
-            // This is logged for debugging purposes.
-
-            env->ReleaseIntArrayElements(gpuDevices, devices, JNI_ABORT);
-        }
-    }
-    // If gpuDevices is null, use default GPU selection based on n_gpu_layers
 
     // Match simple-chat.cpp: if n_batch is 0, set it to n_ctx
     if (data->params.n_batch == 0) {
@@ -250,26 +223,19 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     bool use_mmap = getBooleanField(env, initParams, "useMmap");
     bool use_mlock = getBooleanField(env, initParams, "useMlock");
     bool embeddings_mode = getBooleanField(env, initParams, "embeddings");
+    bool flash_attn = getBooleanField(env, initParams, "flashAttn");
+    bool no_kv_offload = getBooleanField(env, initParams, "noKVOffload");
 
     // Get cache type parameters
     int cache_type_k = getIntField(env, initParams, "cacheTypeK");
     int cache_type_v = getIntField(env, initParams, "cacheTypeV");
     bool no_escape = getBooleanField(env, initParams, "noEscape");
 
-    // Add support for draft model cache types
-    int cache_type_k_draft = getIntField(env, initParams, "cacheTypeKDraft");
-    int cache_type_v_draft = getIntField(env, initParams, "cacheTypeVDraft");
-
-    // Note: Draft cache types would be used when loading draft models for speculative decoding
-    // Currently stored for future use when draft model support is added
-    (void)cache_type_k_draft; // Suppress unused warning
-    (void)cache_type_v_draft; // Suppress unused warning
-
     // Get n_keep parameter for cache reuse
     data->n_keep = getIntField(env, initParams, "nKeep");
 
     // Set escape processing based on noEscape flag
-    data->params.escape = !no_escape;  // escape is opposite of noEscape
+    data->params.escape = !no_escape;
 
     // Set seed properly - only use LLAMA_DEFAULT_SEED if seed is explicitly -1
     data->params.sampling.seed = (seed == -1) ? LLAMA_DEFAULT_SEED : seed;
@@ -282,21 +248,20 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     model_params.use_mmap = use_mmap;
     model_params.use_mlock = use_mlock;
 
+    // Get additional model parameters
+    int main_gpu = getIntField(env, initParams, "mainGpu");
+    model_params.main_gpu = main_gpu;
+
     // Handle tensor splits if provided
     jfloatArray tensorSplits = getFloatArrayField(env, initParams, "tensorSplits");
     if (tensorSplits != nullptr) {
-        // jsize splitCount = env->GetArrayLength(tensorSplits);
-        // Note: tensor_split is const in newer API, skip for now
-        // TODO: Find alternative way to set tensor splits
-        /*
-        if (splitCount > 0 && splitCount <= LLAMA_MAX_DEVICES) {
+        jsize splitCount = env->GetArrayLength(tensorSplits);
+        if (splitCount > 0) {
             jfloat* splits = env->GetFloatArrayElements(tensorSplits, nullptr);
-            for (jsize i = 0; i < splitCount && i < LLAMA_MAX_DEVICES; i++) {
-                model_params.tensor_split[i] = splits[i];
-            }
+            // Note: Can't modify const tensor_split in newer API
+            // This would need to be handled differently in newer llama.cpp versions
             env->ReleaseFloatArrayElements(tensorSplits, splits, JNI_ABORT);
         }
-        */
     }
 
     data->model = llama_model_load_from_file(modelPath_cstr, model_params);
@@ -312,11 +277,23 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = data->params.n_ctx;
     ctx_params.n_batch = data->params.n_batch;
+    ctx_params.n_ubatch = data->params.n_ubatch;
     ctx_params.n_threads = data->params.cpuparams.n_threads;
     ctx_params.n_threads_batch = data->params.cpuparams_batch.n_threads;
     ctx_params.embeddings = embeddings_mode;
+    ctx_params.flash_attn = flash_attn;
+    ctx_params.no_perf = false;
     ctx_params.type_k = (ggml_type)cache_type_k;
     ctx_params.type_v = (ggml_type)cache_type_v;
+
+    // Get additional context parameters
+    float defrag_threshold = getFloatField(env, initParams, "defragThreshold");
+    if (defrag_threshold > 0) {
+        ctx_params.defrag_thold = defrag_threshold;
+    }
+
+    // No KV offload parameter
+    ctx_params.offload_kqv = !no_kv_offload;
 
     data->ctx = llama_init_from_model(data->model, ctx_params);
     if (!data->ctx) {
@@ -326,14 +303,11 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
         return 0;
     }
 
-    // Initialize sampler with simple-chat.cpp parameters, using proper seed handling
-    data->sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
-    llama_sampler_chain_add(data->sampler, llama_sampler_init_min_p(0.05f, 1));
-    llama_sampler_chain_add(data->sampler, llama_sampler_init_temp(0.8f));
-    llama_sampler_chain_add(data->sampler, llama_sampler_init_dist(data->params.sampling.seed));
+    // Initialize sampler - will be recreated in generate with actual parameters
+    data->sampler = nullptr;
 
     // Initialize formatted_chat buffer with context size
-    data->formatted_chat.resize(data->n_ctx);
+    data->formatted_chat.resize(data->n_ctx * 4); // Extra space for formatting
 
     LlamaContextData* released_data = data.release();
     {
@@ -385,37 +359,54 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
 
     std::string user_input(prompt_cstr);
 
+    // Extract ALL parameters from GenerateParams
     int n_predict = getIntField(env, generateParams, "nPredict");
+
+    // Basic sampling parameters
+    float temp = getFloatField(env, generateParams, "temp");
     int top_k = getIntField(env, generateParams, "topK");
     float top_p = getFloatField(env, generateParams, "topP");
-    float temp = getFloatField(env, generateParams, "temp");
+    float min_p = getFloatField(env, generateParams, "minP");
+    float tfs_z = getFloatField(env, generateParams, "tfsZ");
+    float typical_p = getFloatField(env, generateParams, "typicalP");
+    int seed = getIntField(env, generateParams, "seed");
+
+    // Repetition penalty parameters
     float repeat_penalty = getFloatField(env, generateParams, "repeatPenalty");
     int repeat_last_n = getIntField(env, generateParams, "repeatLastN");
-    // stream field removed - streaming is controlled by tokenCallback presence
-    int seed = getIntField(env, generateParams, "seed");
+    float frequency_penalty = getFloatField(env, generateParams, "frequencyPenalty");
+    float presence_penalty = getFloatField(env, generateParams, "presencePenalty");
+    bool penalize_nl = getBooleanField(env, generateParams, "penalizeNl");
+
+    // Mirostat parameters
+    int mirostat = getIntField(env, generateParams, "mirostat");
+    float mirostat_tau = getFloatField(env, generateParams, "mirostatTau");
+    float mirostat_eta = getFloatField(env, generateParams, "mirostatEta");
+
+    // DRY parameters
+    float dry_multiplier = getFloatField(env, generateParams, "dryMultiplier");
+    float dry_base = getFloatField(env, generateParams, "dryBase");
+    int dry_allowed_length = getIntField(env, generateParams, "dryAllowedLength");
+    int dry_penalty_last_n = getIntField(env, generateParams, "dryPenaltyLastN");
+
+    // XTC parameters
+    float xtc_threshold = getFloatField(env, generateParams, "xtcThreshold");
+    float xtc_probability = getFloatField(env, generateParams, "xtcProbability");
+
+    // Dynamic temperature
+    float dyn_temp_range = getFloatField(env, generateParams, "dynTempRange");
+    float dyn_temp_exponent = getFloatField(env, generateParams, "dynTempExponent");
+
+    // Other parameters
+    int keep = getIntField(env, generateParams, "keep");
+    bool ignore_eos = getBooleanField(env, generateParams, "ignoreEos");
 
     // Get vocab from model
     const struct llama_vocab * vocab = llama_model_get_vocab(data->model);
 
-    // Check if this is first prompt in the conversation
-    const bool is_first = llama_memory_seq_pos_max(llama_get_memory(data->ctx), 0) == -1;
-
-    // Get keep parameter from GenerateParams to allow per-generation control
-    int keep = getIntField(env, generateParams, "keep");
-
-    // If keep is specified in GenerateParams and different from the init value, update it
+    // Get keep parameter from GenerateParams
     if (keep != -1 && keep != data->n_keep) {
-        fprintf(stderr, "Overriding n_keep: %d -> %d for this generation\n", data->n_keep, keep);
-        // Override n_keep for this generation
         data->n_keep = keep;
-
-        // If we're disabling caching (keep=0) and have cached tokens, clear them
-        if (keep == 0 && data->cached_token_count > 0) {
-            llama_memory_t mem = llama_get_memory(data->ctx);
-            llama_memory_clear(mem, false);
-            data->cached_tokens.clear();
-            data->cached_token_count = 0;
-        }
     }
 
     // Debug output
@@ -424,43 +415,104 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     fprintf(stderr, "temp: %.2f\n", temp);
     fprintf(stderr, "top_k: %d\n", top_k);
     fprintf(stderr, "top_p: %.2f\n", top_p);
+    fprintf(stderr, "min_p: %.2f\n", min_p);
+    fprintf(stderr, "tfs_z: %.2f\n", tfs_z);
+    fprintf(stderr, "typical_p: %.2f\n", typical_p);
     fprintf(stderr, "repeat_penalty: %.2f\n", repeat_penalty);
     fprintf(stderr, "repeat_last_n: %d\n", repeat_last_n);
+    fprintf(stderr, "frequency_penalty: %.2f\n", frequency_penalty);
+    fprintf(stderr, "presence_penalty: %.2f\n", presence_penalty);
+    fprintf(stderr, "mirostat: %d\n", mirostat);
     fprintf(stderr, "seed: %d\n", seed);
-    // stream parameter removed - streaming controlled by tokenCallback
+    fprintf(stderr, "n_keep: %d\n", data->n_keep);
     fprintf(stderr, "=== End parameters ===\n\n");
 
-    // Reset sampler for new generation
-    llama_sampler_reset(data->sampler);
-
-    // Check if we need to recreate sampler with different parameters
-    // Default values: temp=0.8, top_k=40, top_p=0.9, repeat_penalty=1.1
-    bool use_default_sampler = (temp == 0.8f && top_k == 40 && top_p == 0.9f &&
-                                repeat_penalty == 1.1f && seed == -1);
-
-    if (!use_default_sampler) {
-        // Recreate sampler chain with user-provided parameters
+    // Free old sampler and create new one with current parameters
+    if (data->sampler) {
         llama_sampler_free(data->sampler);
-        data->sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    }
 
-        // Add samplers to match llama-cli behavior
-        if (top_k > 0 && top_k < llama_vocab_n_tokens(vocab)) {
-            llama_sampler_chain_add(data->sampler, llama_sampler_init_top_k(top_k));
-        }
-        if (top_p < 1.0f && top_p > 0.0f) {
-            llama_sampler_chain_add(data->sampler, llama_sampler_init_top_p(top_p, 1));
-        }
-        llama_sampler_chain_add(data->sampler, llama_sampler_init_min_p(0.05f, 1));
-        llama_sampler_chain_add(data->sampler, llama_sampler_init_temp(temp));
-        if (repeat_penalty != 1.0f && repeat_last_n > 0) {
-            llama_sampler_chain_add(data->sampler, llama_sampler_init_penalties(
-                repeat_last_n,    // penalty_last_n
-                repeat_penalty,   // penalty_repeat
-                0.0f,            // penalty_freq (disabled)
-                0.0f             // penalty_present (disabled)
+    // Create sampler chain with ALL parameters
+    data->sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
+
+    // Add DRY sampler if enabled
+    if (dry_multiplier > 0.0f) {
+        std::vector<std::string> dry_breakers_strs;
+        // TODO: Get dry sequence breakers from Java if needed
+        // For now use default breakers
+        dry_breakers_strs.push_back("\n");
+        dry_breakers_strs.push_back("###");
+        dry_breakers_strs.push_back("\\n");
+
+        llama_sampler_chain_add(data->sampler,
+            llama_sampler_init_dry(vocab, dry_multiplier, dry_base,
+                                 dry_allowed_length, dry_penalty_last_n,
+                                 dry_breakers_strs));
+    }
+
+    // Add samplers in the correct order (matching llama-cli)
+    llama_sampler_chain_add(data->sampler,
+        llama_sampler_init_logit_bias(vocab, 0, nullptr, nullptr));
+
+    // Add penalties sampler if any penalty is set
+    if (repeat_penalty != 1.0f || frequency_penalty != 0.0f || presence_penalty != 0.0f) {
+        llama_sampler_chain_add(data->sampler,
+            llama_sampler_init_penalties(
+                repeat_last_n,
+                repeat_penalty,
+                frequency_penalty,
+                presence_penalty
             ));
-        }
-        // Use the seed from parameters, only use LLAMA_DEFAULT_SEED if seed is -1
+    }
+
+    // Top-K sampling
+    if (top_k > 0) {
+        llama_sampler_chain_add(data->sampler, llama_sampler_init_top_k(top_k));
+    }
+
+    // Tail-free sampling
+    if (tfs_z < 1.0f) {
+        llama_sampler_chain_add(data->sampler, llama_sampler_init_tail_free(tfs_z, 1));
+    }
+
+    // Typical sampling
+    if (typical_p < 1.0f) {
+        llama_sampler_chain_add(data->sampler, llama_sampler_init_typical(typical_p, 1));
+    }
+
+    // Top-P sampling
+    if (top_p < 1.0f) {
+        llama_sampler_chain_add(data->sampler, llama_sampler_init_top_p(top_p, 1));
+    }
+
+    // Min-P sampling
+    if (min_p > 0.0f) {
+        llama_sampler_chain_add(data->sampler, llama_sampler_init_min_p(min_p, 1));
+    }
+
+    // XTC sampling
+    if (xtc_probability > 0.0f && xtc_threshold > 0.0f) {
+        llama_sampler_chain_add(data->sampler,
+            llama_sampler_init_xtc(xtc_probability, xtc_threshold, 1, seed));
+    }
+
+    // Dynamic temperature or regular temperature
+    if (dyn_temp_range > 0.0f) {
+        llama_sampler_chain_add(data->sampler,
+            llama_sampler_init_temp_ext(temp, dyn_temp_range, dyn_temp_exponent));
+    } else {
+        llama_sampler_chain_add(data->sampler, llama_sampler_init_temp(temp));
+    }
+
+    // Mirostat sampling (replaces temperature)
+    if (mirostat == 1) {
+        llama_sampler_chain_add(data->sampler,
+            llama_sampler_init_mirostat(llama_n_vocab(data->model), seed, mirostat_tau, mirostat_eta, 100));
+    } else if (mirostat == 2) {
+        llama_sampler_chain_add(data->sampler,
+            llama_sampler_init_mirostat_v2(seed, mirostat_tau, mirostat_eta));
+    } else {
+        // Regular sampling
         uint32_t actual_seed = (seed == -1) ? LLAMA_DEFAULT_SEED : (uint32_t)seed;
         llama_sampler_chain_add(data->sampler, llama_sampler_init_dist(actual_seed));
     }
@@ -471,32 +523,25 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     // Add user message to chat history
     data->chat_messages.push_back({"user", strdup(user_input.c_str())});
 
-    // Format messages with chat template
+    // Format ALL messages with chat template to get complete prompt
     if (data->formatted_chat.empty()) {
-        data->formatted_chat.resize(data->n_ctx);
+        data->formatted_chat.resize(data->n_ctx * 4);
     }
 
     int new_len;
     if (tmpl == nullptr) {
-        // No template found - use simple format for Llama-2
+        // No template found - use simple format
         fprintf(stderr, "No chat template found, using simple format\n");
 
-        // For first message, just use the prompt directly
-        if (is_first) {
-            new_len = snprintf(data->formatted_chat.data(), data->formatted_chat.size(),
-                             "%s", user_input.c_str());
-        } else {
-            // For subsequent messages, append to existing conversation
-            std::string formatted_messages;
-            for (size_t i = 0; i < data->chat_messages.size() - 1; i++) {
-                formatted_messages += data->chat_messages[i].content;
-                formatted_messages += "\n";
-            }
-            formatted_messages += user_input;
-
-            new_len = snprintf(data->formatted_chat.data(), data->formatted_chat.size(),
-                             "%s", formatted_messages.c_str());
+        // Build complete conversation
+        std::string complete_prompt;
+        for (size_t i = 0; i < data->chat_messages.size(); i++) {
+            if (i > 0) complete_prompt += "\n";
+            complete_prompt += data->chat_messages[i].content;
         }
+
+        new_len = snprintf(data->formatted_chat.data(), data->formatted_chat.size(),
+                         "%s", complete_prompt.c_str());
     } else {
         // Use the model's chat template
         new_len = llama_chat_apply_template(tmpl, data->chat_messages.data(),
@@ -504,7 +549,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
                                            data->formatted_chat.data(), data->formatted_chat.size());
 
         if (new_len > (int)data->formatted_chat.size()) {
-            data->formatted_chat.resize(new_len);
+            data->formatted_chat.resize(new_len * 2);
             new_len = llama_chat_apply_template(tmpl, data->chat_messages.data(),
                                               data->chat_messages.size(), true,
                                               data->formatted_chat.data(), data->formatted_chat.size());
@@ -517,41 +562,25 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         return -1;
     }
 
-    // Extract only the new part of the prompt (remove previous content)
-    std::string prompt(data->formatted_chat.begin() + data->prev_len,
-                      data->formatted_chat.begin() + new_len);
-
-    // Log the formatted prompt for debugging
-    fprintf(stderr, "\n=== Debug: Chat template application ===\n");
-    fprintf(stderr, "Template: %s\n", tmpl ? tmpl : "null");
-    fprintf(stderr, "Messages count: %zu\n", data->chat_messages.size());
-    fprintf(stderr, "Previous length: %d\n", data->prev_len);
-    fprintf(stderr, "New length: %d\n", new_len);
-    fprintf(stderr, "Is first message: %s\n", is_first ? "true" : "false");
-    fprintf(stderr, "\n=== Formatted prompt (new part only) ===\n");
-    fprintf(stderr, "%s", prompt.c_str());
-    fprintf(stderr, "\n=== End of formatted prompt (length: %zu) ===\n", prompt.length());
-
-    // Log first few tokens for debugging
-    if (prompt.length() > 0) {
-        fprintf(stderr, "First 10 chars (hex): ");
-        for (size_t i = 0; i < std::min(prompt.length(), size_t(10)); i++) {
-            fprintf(stderr, "%02x ", (unsigned char)prompt[i]);
-        }
-        fprintf(stderr, "\n");
-    }
+    // Get the COMPLETE prompt
+    std::string complete_prompt(data->formatted_chat.begin(), data->formatted_chat.begin() + new_len);
 
     env->ReleaseStringUTFChars(prompt_jstr, prompt_cstr);
 
-    // Tokenize the new prompt part
-    const int n_prompt_tokens = -llama_tokenize(vocab, prompt.c_str(), prompt.size(),
-                                              NULL, 0, is_first, true);
+    // Tokenize the COMPLETE prompt
+    const int n_prompt_tokens = -llama_tokenize(vocab, complete_prompt.c_str(), complete_prompt.size(),
+                                              NULL, 0, true, true);
     std::vector<llama_token> prompt_tokens(n_prompt_tokens);
-    if (llama_tokenize(vocab, prompt.c_str(), prompt.size(),
-                      prompt_tokens.data(), prompt_tokens.size(), is_first, true) < 0) {
+    if (llama_tokenize(vocab, complete_prompt.c_str(), complete_prompt.size(),
+                      prompt_tokens.data(), prompt_tokens.size(), true, true) < 0) {
         set_last_error("Failed to tokenize the prompt");
         return -1;
     }
+
+    fprintf(stderr, "\n=== Token processing ===\n");
+    fprintf(stderr, "Complete prompt tokens: %d\n", n_prompt_tokens);
+    fprintf(stderr, "Previous tokens processed: %d\n", data->n_past);
+    fprintf(stderr, "n_keep: %d\n", data->n_keep);
 
     // Get token callback
     jobject tokenCallback = getObjectField(env, generateParams, "tokenCallback", "Ljava/util/function/Predicate;");
@@ -563,84 +592,58 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         testMethod = env->GetMethodID(predicateClass, "test", "(Ljava/lang/Object;)Z");
     }
 
-    // Cache reuse logic: find common prefix with cached tokens
-    int common_prefix_len = 0;
+    // Find common prefix between old and new tokens
+    int common_prefix = 0;
+    int min_len = std::min((int)data->all_tokens.size(), n_prompt_tokens);
 
-    // Only reuse cache if n_keep is enabled (not 0)
-    if (!is_first && data->cached_token_count > 0 && data->n_keep != 0) {
-        // For large prompts with small questions, we want to find the common prefix
-        // between the old and new token sequences
-
-        // Compare tokens to find the longest common prefix
-        int max_compare = std::min(data->cached_token_count, n_prompt_tokens);
-        for (int i = 0; i < max_compare; i++) {
-            if (data->cached_tokens[i] == prompt_tokens[i]) {
-                common_prefix_len++;
+    // If n_keep is 0, don't reuse any cache
+    if (data->n_keep == 0) {
+        // Clear everything
+        llama_kv_cache_clear(data->ctx);
+        data->all_tokens.clear();
+        data->n_past = 0;
+        common_prefix = 0;
+    } else {
+        // Find common prefix
+        for (int i = 0; i < min_len; i++) {
+            if (data->all_tokens[i] == prompt_tokens[i]) {
+                common_prefix++;
             } else {
-                break;  // Stop at first mismatch
+                break;
             }
         }
 
-        // If n_keep is set to a specific value, limit the prefix length
+        // Limit by n_keep if specified
         if (data->n_keep > 0) {
-            common_prefix_len = std::min(common_prefix_len, data->n_keep);
+            common_prefix = std::min(common_prefix, data->n_keep);
         }
-        // If n_keep is -1, use all common prefix tokens
 
-        fprintf(stderr, "\n=== Cache reuse analysis ===\n");
-        fprintf(stderr, "n_keep: %d\n", data->n_keep);
-        fprintf(stderr, "Cached tokens: %d\n", data->cached_token_count);
-        fprintf(stderr, "New prompt tokens: %d\n", n_prompt_tokens);
-        fprintf(stderr, "Common prefix length: %d\n", common_prefix_len);
-        fprintf(stderr, "Tokens to process: %d\n", n_prompt_tokens - common_prefix_len);
-        fprintf(stderr, "===========================\n");
-
-        // If we have a common prefix, we can skip processing those tokens
-        if (common_prefix_len > 0 && common_prefix_len < data->cached_token_count) {
-            // Remove non-matching tokens from KV cache
-            llama_memory_t mem = llama_get_memory(data->ctx);
-            llama_memory_seq_rm(mem, 0, common_prefix_len, -1);
-        } else if (common_prefix_len == 0) {
-            // No common prefix, clear the cache
-            llama_memory_t mem = llama_get_memory(data->ctx);
-            llama_memory_clear(mem, false);
+        // Remove KV cache entries beyond common prefix
+        if (common_prefix < data->n_past) {
+            llama_kv_cache_seq_rm(data->ctx, 0, common_prefix, -1);
+            data->n_past = common_prefix;
         }
-        // If common_prefix_len == cached_token_count, all cached tokens match, keep them all
-    } else if (is_first && data->n_keep == 0) {
-        // If n_keep is 0 and this is the first message, ensure cache is clear
-        llama_memory_t mem = llama_get_memory(data->ctx);
-        llama_memory_clear(mem, false);
-        data->cached_token_count = 0;
     }
 
-    // Update cached tokens to the new prompt tokens
-    data->cached_tokens = prompt_tokens;
-    data->cached_token_count = n_prompt_tokens;
+    fprintf(stderr, "Common prefix: %d tokens\n", common_prefix);
+    fprintf(stderr, "Tokens to process: %d\n", n_prompt_tokens - common_prefix);
+    fprintf(stderr, "=== End token processing ===\n");
 
-    // Process prompt tokens in batches (matching simple-chat.cpp)
+    // Update stored tokens
+    data->all_tokens = prompt_tokens;
+
+    // Process new tokens in batches
     int n_batch = llama_n_batch(data->ctx);
     int n_ctx = llama_n_ctx(data->ctx);
     std::string response;
 
-    fprintf(stderr, "\n=== Batch processing ===\n");
-    fprintf(stderr, "Prompt tokens: %d\n", n_prompt_tokens);
-    fprintf(stderr, "Batch size: %d\n", n_batch);
-    fprintf(stderr, "Context size: %d\n", n_ctx);
-    fprintf(stderr, "Starting from token: %d\n", common_prefix_len);
-
-    // First, process the prompt tokens in batches, skipping common prefix
-    for (int i = common_prefix_len; i < n_prompt_tokens; i += n_batch) {
+    // Process only new tokens (from common_prefix to end)
+    for (int i = common_prefix; i < n_prompt_tokens; i += n_batch) {
         int batch_size = std::min(n_batch, n_prompt_tokens - i);
         llama_batch batch = llama_batch_get_one(prompt_tokens.data() + i, batch_size);
 
-        // Check if we have enough space in the context
-        int n_ctx_used = llama_memory_seq_pos_max(llama_get_memory(data->ctx), 0) + 1;
-        fprintf(stderr, "Processing batch %d-%d, context used: %d/%d\n",
-                i, i + batch_size, n_ctx_used, n_ctx);
-
-        if (n_ctx_used + batch.n_tokens > n_ctx) {
-            fprintf(stderr, "context size exceeded: used %d + batch %d > max %d\n",
-                    n_ctx_used, batch.n_tokens, n_ctx);
+        if (data->n_past + batch.n_tokens > n_ctx) {
+            fprintf(stderr, "context size exceeded\n");
             set_last_error("Context size exceeded");
             return -1;
         }
@@ -650,8 +653,9 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
             set_last_error("Failed to decode prompt batch, ret = " + std::to_string(ret));
             return -1;
         }
+
+        data->n_past += batch.n_tokens;
     }
-    fprintf(stderr, "=== End batch processing ===\n");
 
     // Now generate the response token by token
     llama_token new_token_id;
@@ -662,7 +666,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         new_token_id = llama_sampler_sample(data->sampler, data->ctx, -1);
 
         // Is it an end of generation?
-        if (llama_vocab_is_eog(vocab, new_token_id)) {
+        if (!ignore_eos && llama_vocab_is_eog(vocab, new_token_id)) {
             break;
         }
 
@@ -677,7 +681,10 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         response += piece;
         n_generated++;
 
-        // Stream callback - streaming controlled by tokenCallback presence
+        // Add to all_tokens
+        data->all_tokens.push_back(new_token_id);
+
+        // Stream callback
         if (tokenCallback) {
             jstring tokenJStr = env->NewStringUTF(piece.c_str());
             jboolean shouldContinue = env->CallBooleanMethod(tokenCallback, testMethod, tokenJStr);
@@ -691,10 +698,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         // Prepare the next batch with the sampled token
         llama_batch batch = llama_batch_get_one(&new_token_id, 1);
 
-        // Check context size again
-        int n_ctx = llama_n_ctx(data->ctx);
-        int n_ctx_used = llama_memory_seq_pos_max(llama_get_memory(data->ctx), 0) + 1;
-        if (n_ctx_used + batch.n_tokens > n_ctx) {
+        if (data->n_past + batch.n_tokens > n_ctx) {
             fprintf(stderr, "context size exceeded\n");
             set_last_error("Context size exceeded");
             break;
@@ -705,33 +709,16 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
             set_last_error("Failed to decode, ret = " + std::to_string(ret));
             break;
         }
+
+        data->n_past += batch.n_tokens;
     }
 
     // Add the response to the messages
     data->chat_messages.push_back({"assistant", strdup(response.c_str())});
 
-    // Update prev_len to point to end of all messages (without adding assistant prefix)
-    // This matches simple-chat.cpp behavior
-    if (tmpl == nullptr) {
-        // For simple format, calculate the length of all messages
-        data->prev_len = 0;
-        for (const auto& msg : data->chat_messages) {
-            data->prev_len += strlen(msg.content) + 1; // +1 for newline
-        }
-    } else {
-        data->prev_len = llama_chat_apply_template(tmpl, data->chat_messages.data(),
-                                                  data->chat_messages.size(), false,
-                                                  nullptr, 0);
-        if (data->prev_len < 0) {
-            set_last_error("Failed to apply the chat template");
-            return -1;
-        }
-    }
-
     fprintf(stderr, "\n=== Generation complete ===\n");
-    fprintf(stderr, "Response length: %zu tokens\n", response.length());
-    fprintf(stderr, "Updated prev_len: %d\n", data->prev_len);
-    fprintf(stderr, "Total messages: %zu\n", data->chat_messages.size());
+    fprintf(stderr, "Generated %d tokens\n", n_generated);
+    fprintf(stderr, "Total tokens in context: %d\n", data->n_past);
     fprintf(stderr, "=========================\n");
 
     return 0;
@@ -790,29 +777,26 @@ JNIEXPORT void JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1clear_1chat
         return;
     }
 
-    // Free existing chat messages using helper function
+    // Free existing chat messages
     free_chat_messages(data->chat_messages);
 
     // Clear formatted chat buffer
     data->formatted_chat.clear();
-    data->prev_len = 0;
 
-    // Clear cached tokens based on n_keep setting
+    // Clear token tracking based on n_keep
     if (data->n_keep == 0) {
-        // n_keep is 0, clear everything
-        data->cached_tokens.clear();
-        data->cached_token_count = 0;
-        llama_memory_t mem = llama_get_memory(data->ctx);
-        llama_memory_clear(mem, false);
-    } else if (data->n_keep > 0 && data->cached_token_count > data->n_keep) {
+        // Clear everything
+        data->all_tokens.clear();
+        data->n_past = 0;
+        llama_kv_cache_clear(data->ctx);
+    } else if (data->n_keep > 0 && data->n_past > data->n_keep) {
         // Keep only first n_keep tokens
-        data->cached_tokens.resize(data->n_keep);
-        data->cached_token_count = data->n_keep;
+        data->all_tokens.resize(data->n_keep);
+        data->n_past = data->n_keep;
         // Clear KV cache beyond n_keep
-        llama_memory_t mem = llama_get_memory(data->ctx);
-        llama_memory_seq_rm(mem, 0, data->n_keep, -1);
+        llama_kv_cache_seq_rm(data->ctx, 0, data->n_keep, -1);
     }
-    // If n_keep is -1, keep all cached tokens (don't clear)
+    // If n_keep is -1, keep everything (don't clear)
 }
 
 #ifdef __clang__
