@@ -19,7 +19,7 @@ public class InitParams {
     public String cpuRangeBatch = "";      // CPU range for batch processing
     public boolean cpuStrictBatch = false; // Strict CPU placement for batch
     public int priorityBatch = 0;          // Priority for batch processing
-    public boolean pollBatch = true;       // Use polling for batch
+    public int pollBatch = 50;             // Polling level for batch (0-100, 0 = no polling)
 
     // === Context and Batch Configuration ===
     public int nCtx = 4096;                // Context size (0 = from model)
@@ -64,6 +64,14 @@ public class InitParams {
     public float yarnBetaFast = 32.0f;     // Low correction dim
 
     // === Cache Configuration ===
+    // Cache types (ggml_type enum):
+    // 0 = GGML_TYPE_F32 (32-bit float, uses most memory)
+    // 1 = GGML_TYPE_F16 (16-bit float, default, good balance)
+    // 2 = GGML_TYPE_Q4_0 (4-bit quantization, uses least memory but may affect quality)
+    // 3 = GGML_TYPE_Q4_1 (4-bit quantization with scale)
+    // 6 = GGML_TYPE_Q5_0 (5-bit quantization)
+    // 7 = GGML_TYPE_Q5_1 (5-bit quantization with scale)
+    // 8 = GGML_TYPE_Q8_0 (8-bit quantization)
     public int cacheTypeK = 1;             // KV cache type K (1 = f16)
     public int cacheTypeV = 1;             // KV cache type V (1 = f16)
     public int cacheTypeKDraft = 1;        // Draft model cache type K
@@ -86,7 +94,9 @@ public class InitParams {
     public int seed = -1;                  // RNG seed (-1 = random)
 
     // === Logging Configuration ===
+    public boolean verbose = false;        // Enable verbose output
     public boolean logDisable = false;     // Disable logging
+    public int logLevel = 2;               // Log level: 0=none, 1=debug, 2=info (default), 3=warn, 4=error
     public String logFile = "";            // Log to file
     public boolean logPrefix = false;      // Enable log prefix
     public boolean logTimestamps = false;  // Enable log timestamps
