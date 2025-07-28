@@ -12,6 +12,8 @@
 #include <cstring>
 #include <sstream>
 #include <fstream>
+#include <chrono>
+#include <ctime>
 #include <nlohmann/json.hpp>
 
 #ifdef _WIN32
@@ -48,6 +50,9 @@ struct LlamaContextData {
 
     // For proper caching in plain text mode
     std::string last_prompt;  // Track previous prompt to detect continuations
+
+    // Logging
+    bool verbose = false;  // Enable verbose output for the entire session
 };
 
 // --- Globals for safe resource management ---
@@ -57,6 +62,13 @@ static std::unordered_set<LlamaContextData*> g_active_contexts;
 // --- Error handling ---
 static std::mutex g_error_mutex;
 static std::string last_error_message;
+
+// --- Logging configuration ---
+static int g_log_level = 2; // Default to INFO
+static bool g_log_prefix = false;
+static bool g_log_timestamps = false;
+static FILE* g_log_file = nullptr;
+static std::mutex g_log_mutex;
 
 // --- Helper function to free chat messages ---
 static void free_chat_messages(std::vector<llama_chat_message>& messages) {
@@ -73,6 +85,42 @@ static void free_chat_messages(std::vector<llama_chat_message>& messages) {
 static void set_last_error(const std::string& error) {
     std::lock_guard<std::mutex> lock(g_error_mutex);
     last_error_message = error;
+}
+
+// --- Custom log callback ---
+static void custom_log_callback(ggml_log_level level, const char* text, void* /* user_data */) {
+    // Filter by log level
+    if (level > g_log_level && level != GGML_LOG_LEVEL_CONT) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+
+    FILE* out = g_log_file ? g_log_file : stderr;
+
+    // Add timestamp if enabled
+    if (g_log_timestamps && level != GGML_LOG_LEVEL_CONT) {
+        auto now = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()) % 1000;
+
+        char time_buf[100];
+        std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", std::localtime(&time_t));
+        fprintf(out, "[%s.%03d] ", time_buf, (int)ms.count());
+    }
+
+    // Add log level prefix if enabled
+    if (g_log_prefix && level != GGML_LOG_LEVEL_CONT) {
+        const char* level_str[] = {"NONE", "DEBUG", "INFO", "WARN", "ERROR", ""};
+        if (level >= 0 && level <= 4) {
+            fprintf(out, "[%s] ", level_str[level]);
+        }
+    }
+
+    // Print the actual message
+    fprintf(out, "%s", text);
+    fflush(out);
 }
 
 // --- JNI Lifecycle Hooks ---
@@ -99,6 +147,12 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM * /* vm */, void * /* reserved */) {
 }
 
 JNIEXPORT void JNICALL JNI_OnUnload(JavaVM * /* vm */, void * /* reserved */) {
+    // Close log file if open
+    if (g_log_file) {
+        fclose(g_log_file);
+        g_log_file = nullptr;
+    }
+
     std::lock_guard<std::mutex> lock(g_context_registry_mutex);
     // Clean up any contexts the user forgot to destroy
     for (auto* data : g_active_contexts) {
@@ -168,7 +222,22 @@ static jfloat getFloatField(JNIEnv *env, jobject obj, const char* fieldName) {
 
 static jboolean getBooleanField(JNIEnv *env, jobject obj, const char* fieldName) {
     jclass cls = env->GetObjectClass(obj);
+    if (!cls) {
+        fprintf(stderr, "ERROR: Failed to get class for field %s\n", fieldName);
+        return false;
+    }
+
     jfieldID fid = env->GetFieldID(cls, fieldName, "Z");
+    if (!fid) {
+        // Clear exception if any
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+        }
+        fprintf(stderr, "WARNING: Field %s (Z) not found, using default value false\n", fieldName);
+        return false;
+    }
+
     return env->GetBooleanField(obj, fid);
 }
 
@@ -311,7 +380,7 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     jstring cpu_range_batch_str = getStringField(env, initParams, "cpuRangeBatch");
     bool cpu_strict_batch = getBooleanField(env, initParams, "cpuStrictBatch");
     int priority_batch = getIntField(env, initParams, "priorityBatch");
-    bool poll_batch = getBooleanField(env, initParams, "pollBatch");
+    int poll_batch = getIntField(env, initParams, "pollBatch");
 
     // TODO: Apply CPU affinity settings when platform-specific code is available
     if (cpu_mask_str) {
@@ -355,6 +424,16 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     // Cache reuse parameter
     int n_keep = getIntField(env, initParams, "nKeep");
     data->n_keep = n_keep;  // Store initial n_keep value
+
+    // Log n_keep value for debugging
+    if (n_keep == -1) {
+        fprintf(stderr, "n_keep = -1 (keep all tokens)\n");
+    } else if (n_keep == 0) {
+        fprintf(stderr, "n_keep = 0 (no cache reuse)\n");
+    } else {
+        fprintf(stderr, "n_keep = %d\n", n_keep);
+    }
+
     bool swa_full = getBooleanField(env, initParams, "swaFull");
 
     // === Model Loading Parameters ===
@@ -467,10 +546,33 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     }
 
     // Logging configuration
+    bool verbose = getBooleanField(env, initParams, "verbose");
+    data->verbose = verbose;  // Store verbose flag for the session
+
     bool log_disable = getBooleanField(env, initParams, "logDisable");
+    int log_level = getIntField(env, initParams, "logLevel");
+    bool log_prefix = getBooleanField(env, initParams, "logPrefix");
+    bool log_timestamps = getBooleanField(env, initParams, "logTimestamps");
+
+    // Configure logging
     if (log_disable) {
         // Disable logging
         llama_log_set(nullptr, nullptr);
+        ggml_log_set(nullptr, nullptr);
+    } else {
+        // Set log configuration
+        g_log_level = log_level;
+        g_log_prefix = log_prefix;
+        g_log_timestamps = log_timestamps;
+
+        // Set custom log callback
+        llama_log_set(custom_log_callback, nullptr);
+        ggml_log_set(custom_log_callback, nullptr);
+
+        if (verbose || log_level <= GGML_LOG_LEVEL_INFO) {
+            fprintf(stderr, "Logging enabled: level=%d, prefix=%s, timestamps=%s\n",
+                    log_level, log_prefix ? "yes" : "no", log_timestamps ? "yes" : "no");
+        }
     }
 
     // GPU device configuration
@@ -529,17 +631,19 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
 
     // === Extended Logging Configuration ===
     jstring log_file_str = getStringField(env, initParams, "logFile");
-    bool log_prefix = getBooleanField(env, initParams, "logPrefix");
-    bool log_timestamps = getBooleanField(env, initParams, "logTimestamps");
 
     if (log_file_str && !log_disable) {
         const char* log_file_cstr = env->GetStringUTFChars(log_file_str, nullptr);
-        // TODO: Set up file logging
-        // Would need to implement custom log handler that writes to file
+        if (strlen(log_file_cstr) > 0) {
+            g_log_file = fopen(log_file_cstr, "a");
+            if (g_log_file) {
+                fprintf(stderr, "Logging to file: %s\n", log_file_cstr);
+            } else {
+                fprintf(stderr, "Warning: Failed to open log file: %s\n", log_file_cstr);
+            }
+        }
         env->ReleaseStringUTFChars(log_file_str, log_file_cstr);
     }
-    (void)log_prefix;
-    (void)log_timestamps;
 
     // === Model Modification Parameters ===
     bool quantize_output_tensor = getBooleanField(env, initParams, "quantizeOutputTensor");
@@ -736,7 +840,16 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     int n_predict = getIntField(env, generateParams, "nPredict");
     bool escape = getBooleanField(env, generateParams, "escape");
     bool no_escape = getBooleanField(env, generateParams, "noEscape");
-    bool verbose = getBooleanField(env, generateParams, "verbose");
+
+    // Use verbose from InitParams, but allow override from GenerateParams
+    bool verbose = data->verbose;
+    jfieldID verbose_fid = env->GetFieldID(env->GetObjectClass(generateParams), "verbose", "Z");
+    if (verbose_fid && !env->ExceptionCheck()) {
+        bool generate_verbose = env->GetBooleanField(generateParams, verbose_fid);
+        verbose = verbose || generate_verbose;  // Use OR to enable if either is true
+    } else if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
 
     // Apply escape sequence processing
     // Process escapes by default unless no_escape is explicitly set
