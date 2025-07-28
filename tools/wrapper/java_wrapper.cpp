@@ -210,7 +210,22 @@ static jstring getStringField(JNIEnv *env, jobject obj, const char* fieldName) {
 
 static jobject getObjectField(JNIEnv *env, jobject obj, const char* fieldName, const char* sig) {
     jclass cls = env->GetObjectClass(obj);
+    if (!cls) {
+        fprintf(stderr, "ERROR: Failed to get class for field %s\n", fieldName);
+        return nullptr;
+    }
+
     jfieldID fid = env->GetFieldID(cls, fieldName, sig);
+    if (!fid) {
+        // Clear exception if any
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+        }
+        fprintf(stderr, "WARNING: Field %s (%s) not found, using null\n", fieldName, sig);
+        return nullptr;
+    }
+
     return env->GetObjectField(obj, fid);
 }
 
@@ -1684,7 +1699,20 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
 
     if (tokenCallback) {
         predicateClass = env->GetObjectClass(tokenCallback);
-        testMethod = env->GetMethodID(predicateClass, "test", "(Ljava/lang/Object;)Z");
+        if (!predicateClass) {
+            fprintf(stderr, "ERROR: Failed to get Predicate class\n");
+            tokenCallback = nullptr;
+        } else {
+            testMethod = env->GetMethodID(predicateClass, "test", "(Ljava/lang/Object;)Z");
+            if (!testMethod) {
+                if (env->ExceptionCheck()) {
+                    env->ExceptionDescribe();
+                    env->ExceptionClear();
+                }
+                fprintf(stderr, "ERROR: Failed to find test method in Predicate\n");
+                tokenCallback = nullptr;
+            }
+        }
     }
 
     // Find common prefix between old and new tokens
@@ -1815,7 +1843,15 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
             if (n > 0) {
                 std::string piece(buf, n);
                 jstring tokenJStr = env->NewStringUTF(piece.c_str());
-                jboolean shouldContinue = env->CallBooleanMethod(tokenCallback, testMethod, tokenJStr);
+                jboolean shouldContinue = JNI_TRUE;
+                if (tokenCallback && testMethod) {
+                    shouldContinue = env->CallBooleanMethod(tokenCallback, testMethod, tokenJStr);
+                    if (env->ExceptionCheck()) {
+                        env->ExceptionDescribe();
+                        env->ExceptionClear();
+                        shouldContinue = JNI_FALSE;
+                    }
+                }
                 env->DeleteLocalRef(tokenJStr);
 
                 if (!shouldContinue) {
