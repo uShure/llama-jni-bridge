@@ -1262,10 +1262,13 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     }
 
     // Tail-free sampling
-    // Note: TFS sampling appears to be removed from newer llama.cpp
-    // TODO: Check if there's a replacement or if it's integrated into another sampler
     if (tfs_z < 1.0f) {
-        // Skip TFS for now - not available in current API
+        // TODO: Tail-free sampling has been removed from llama.cpp API
+        // It may have been integrated into another sampler or deprecated
+        // For now, we skip TFS when tfs_z < 1.0
+        if (verbose) {
+            fprintf(stderr, "WARNING: Tail-free sampling (tfs_z=%.2f) requested but not available in current API\n", tfs_z);
+        }
     }
 
     // Typical sampling
@@ -1286,7 +1289,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     // XTC sampling
     if (xtc_probability > 0.0f && xtc_threshold > 0.0f) {
         llama_sampler_chain_add(data->sampler,
-            llama_sampler_init_xtc(xtc_probability, xtc_threshold, 1, seed));
+            llama_sampler_init_xtc(xtc_probability, xtc_threshold, xtc_min, seed));
     }
 
     // Dynamic temperature or regular temperature
@@ -1308,6 +1311,20 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         // Regular sampling
         uint32_t actual_seed = (seed == -1) ? LLAMA_DEFAULT_SEED : (uint32_t)seed;
         llama_sampler_chain_add(data->sampler, llama_sampler_init_dist(actual_seed));
+    }
+
+    // Apply grammar constraint if provided (must be last in the chain)
+    if (!grammar.empty()) {
+        // Parse and create grammar sampler
+        llama_sampler * grammar_sampler = llama_sampler_init_grammar(vocab, grammar.c_str(), "root");
+        if (grammar_sampler) {
+            llama_sampler_chain_add(data->sampler, grammar_sampler);
+            if (verbose) {
+                fprintf(stderr, "Applied grammar constraint\n");
+            }
+        } else {
+            fprintf(stderr, "WARNING: Failed to create grammar sampler\n");
+        }
     }
 
     std::string complete_prompt;
@@ -1351,6 +1368,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
             new_len = complete_prompt.length();
             if (new_len > (int)data->formatted_chat.size()) {
                 data->formatted_chat.resize(new_len * 2);
+                new_len = complete_prompt.length();
             }
             memcpy(data->formatted_chat.data(), complete_prompt.c_str(), new_len);
         } else {
@@ -1440,6 +1458,21 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
             fprintf(stderr, "New prompt size: %zu chars\n", complete_prompt.size());
             fprintf(stderr, "New content: %zu chars\n", complete_prompt.size() - data->last_prompt.size());
             fprintf(stderr, "===================================\n\n");
+        }
+    }
+
+    // Additional cases for continuation detection:
+    // 1. When using conversation mode without chat templates
+    // 2. When cache_prompt is enabled and session is being reused
+    // 3. When explicit continuation patterns are detected
+    if (!is_continuation && cache_prompt && !data->all_tokens.empty()) {
+        // If we have cached tokens and caching is enabled, it might be a continuation
+        if (conversation && !chat_mode) {
+            // In conversation mode without chat templates, assume continuation
+            is_continuation = true;
+            if (verbose) {
+                fprintf(stderr, "Treating as continuation in conversation mode\n");
+            }
         }
     }
 
@@ -1697,6 +1730,17 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     llama_token new_token_id;
     int n_generated = 0;
 
+    // Handle n_predict = -1 (generate until context full)
+    int max_tokens = n_predict;
+    if (n_predict == -1) {
+        // Generate until context is full (leave 1 token space)
+        max_tokens = n_ctx - data->n_past - 1;
+        if (verbose) {
+            fprintf(stderr, "n_predict=-1: generating up to %d tokens (context=%d, used=%d)\n",
+                    max_tokens, n_ctx, data->n_past);
+        }
+    }
+
     // Structure to store token probabilities if n_probs > 0
     struct TokenProb {
         llama_token token;
@@ -1705,7 +1749,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     };
     std::vector<std::vector<TokenProb>> all_token_probs; // For each generated token
 
-    while (n_generated < n_predict) {
+    while (n_generated < max_tokens) {
         // Sample the next token
         new_token_id = llama_sampler_sample(data->sampler, data->ctx, -1);
 
