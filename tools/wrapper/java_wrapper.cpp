@@ -126,25 +126,85 @@ static bool is_valid_context(LlamaContextData* data) {
 
 static jint getIntField(JNIEnv *env, jobject obj, const char* fieldName) {
     jclass cls = env->GetObjectClass(obj);
+    if (!cls) {
+        fprintf(stderr, "ERROR: Failed to get class for field %s\n", fieldName);
+        return 0;
+    }
+
     jfieldID fid = env->GetFieldID(cls, fieldName, "I");
+    if (!fid) {
+        // Clear exception if any
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+        }
+        fprintf(stderr, "WARNING: Field %s (I) not found, using default value 0\n", fieldName);
+        return 0;
+    }
+
     return env->GetIntField(obj, fid);
 }
 
 static jfloat getFloatField(JNIEnv *env, jobject obj, const char* fieldName) {
     jclass cls = env->GetObjectClass(obj);
+    if (!cls) {
+        fprintf(stderr, "ERROR: Failed to get class for field %s\n", fieldName);
+        return 0.0f;
+    }
+
     jfieldID fid = env->GetFieldID(cls, fieldName, "F");
+    if (!fid) {
+        // Clear exception if any
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+        }
+        fprintf(stderr, "WARNING: Field %s (F) not found, using default value 0.0\n", fieldName);
+        return 0.0f;
+    }
+
     return env->GetFloatField(obj, fid);
 }
 
 static jboolean getBooleanField(JNIEnv *env, jobject obj, const char* fieldName) {
     jclass cls = env->GetObjectClass(obj);
+    if (!cls) {
+        fprintf(stderr, "ERROR: Failed to get class for field %s\n", fieldName);
+        return JNI_FALSE;
+    }
+
     jfieldID fid = env->GetFieldID(cls, fieldName, "Z");
+    if (!fid) {
+        // Clear exception if any
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+        }
+        fprintf(stderr, "WARNING: Field %s (Z) not found, using default value false\n", fieldName);
+        return JNI_FALSE;
+    }
+
     return env->GetBooleanField(obj, fid);
 }
 
 static jstring getStringField(JNIEnv *env, jobject obj, const char* fieldName) {
     jclass cls = env->GetObjectClass(obj);
+    if (!cls) {
+        fprintf(stderr, "ERROR: Failed to get class for field %s\n", fieldName);
+        return nullptr;
+    }
+
     jfieldID fid = env->GetFieldID(cls, fieldName, "Ljava/lang/String;");
+    if (!fid) {
+        // Clear exception if any
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+        }
+        fprintf(stderr, "WARNING: Field %s (Ljava/lang/String;) not found, using null\n", fieldName);
+        return nullptr;
+    }
+
     return (jstring)env->GetObjectField(obj, fid);
 }
 
@@ -156,13 +216,43 @@ static jobject getObjectField(JNIEnv *env, jobject obj, const char* fieldName, c
 
 static jintArray getIntArrayField(JNIEnv *env, jobject obj, const char* fieldName) {
     jclass cls = env->GetObjectClass(obj);
+    if (!cls) {
+        fprintf(stderr, "ERROR: Failed to get class for field %s\n", fieldName);
+        return nullptr;
+    }
+
     jfieldID fid = env->GetFieldID(cls, fieldName, "[I");
+    if (!fid) {
+        // Clear exception if any
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+        }
+        fprintf(stderr, "WARNING: Field %s ([I) not found, using null\n", fieldName);
+        return nullptr;
+    }
+
     return (jintArray)env->GetObjectField(obj, fid);
 }
 
 static jfloatArray getFloatArrayField(JNIEnv *env, jobject obj, const char* fieldName) {
     jclass cls = env->GetObjectClass(obj);
+    if (!cls) {
+        fprintf(stderr, "ERROR: Failed to get class for field %s\n", fieldName);
+        return nullptr;
+    }
+
     jfieldID fid = env->GetFieldID(cls, fieldName, "[F");
+    if (!fid) {
+        // Clear exception if any
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+        }
+        fprintf(stderr, "WARNING: Field %s ([F) not found, using null\n", fieldName);
+        return nullptr;
+    }
+
     return (jfloatArray)env->GetObjectField(obj, fid);
 }
 
@@ -701,8 +791,20 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     int dry_penalty_last_n = getIntField(env, generateParams, "dryPenaltyLastN");
 
     // Custom DRY sequence breakers
-    jobjectArray dry_breakers_array = (jobjectArray)env->GetObjectField(generateParams,
-        env->GetFieldID(env->GetObjectClass(generateParams), "drySequenceBreakers", "[Ljava/lang/String;"));
+    jobjectArray dry_breakers_array = nullptr;
+    {
+        jclass cls = env->GetObjectClass(generateParams);
+        if (cls) {
+            jfieldID fid = env->GetFieldID(cls, "drySequenceBreakers", "[Ljava/lang/String;");
+            if (fid) {
+                dry_breakers_array = (jobjectArray)env->GetObjectField(generateParams, fid);
+            } else if (env->ExceptionCheck()) {
+                env->ExceptionDescribe();
+                env->ExceptionClear();
+                fprintf(stderr, "WARNING: Field drySequenceBreakers not found\n");
+            }
+        }
+    }
     std::vector<std::string> dry_breakers_vec;
     if (dry_breakers_array) {
         jsize breaker_count = env->GetArrayLength(dry_breakers_array);
@@ -1032,8 +1134,20 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
 
     // === Additional missing fields ===
     // Stop sequences
-    jobjectArray stopSequences = (jobjectArray)env->GetObjectField(generateParams,
-        env->GetFieldID(env->GetObjectClass(generateParams), "stopSequences", "[Ljava/lang/String;"));
+    jobjectArray stopSequences = nullptr;
+    {
+        jclass cls = env->GetObjectClass(generateParams);
+        if (cls) {
+            jfieldID fid = env->GetFieldID(cls, "stopSequences", "[Ljava/lang/String;");
+            if (fid) {
+                stopSequences = (jobjectArray)env->GetObjectField(generateParams, fid);
+            } else if (env->ExceptionCheck()) {
+                env->ExceptionDescribe();
+                env->ExceptionClear();
+                fprintf(stderr, "WARNING: Field stopSequences not found\n");
+            }
+        }
+    }
     std::vector<std::string> stop_sequences;
     if (stopSequences) {
         jsize stop_count = env->GetArrayLength(stopSequences);
