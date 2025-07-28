@@ -168,22 +168,7 @@ static jfloat getFloatField(JNIEnv *env, jobject obj, const char* fieldName) {
 
 static jboolean getBooleanField(JNIEnv *env, jobject obj, const char* fieldName) {
     jclass cls = env->GetObjectClass(obj);
-    if (!cls) {
-        fprintf(stderr, "ERROR: Failed to get class for field %s\n", fieldName);
-        return JNI_FALSE;
-    }
-
     jfieldID fid = env->GetFieldID(cls, fieldName, "Z");
-    if (!fid) {
-        // Clear exception if any
-        if (env->ExceptionCheck()) {
-            env->ExceptionDescribe();
-            env->ExceptionClear();
-        }
-        fprintf(stderr, "WARNING: Field %s (Z) not found, using default value false\n", fieldName);
-        return JNI_FALSE;
-    }
-
     return env->GetBooleanField(obj, fid);
 }
 
@@ -252,22 +237,7 @@ static jintArray getIntArrayField(JNIEnv *env, jobject obj, const char* fieldNam
 
 static jfloatArray getFloatArrayField(JNIEnv *env, jobject obj, const char* fieldName) {
     jclass cls = env->GetObjectClass(obj);
-    if (!cls) {
-        fprintf(stderr, "ERROR: Failed to get class for field %s\n", fieldName);
-        return nullptr;
-    }
-
     jfieldID fid = env->GetFieldID(cls, fieldName, "[F");
-    if (!fid) {
-        // Clear exception if any
-        if (env->ExceptionCheck()) {
-            env->ExceptionDescribe();
-            env->ExceptionClear();
-        }
-        fprintf(stderr, "WARNING: Field %s ([F) not found, using null\n", fieldName);
-        return nullptr;
-    }
-
     return (jfloatArray)env->GetObjectField(obj, fid);
 }
 
@@ -341,7 +311,7 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     jstring cpu_range_batch_str = getStringField(env, initParams, "cpuRangeBatch");
     bool cpu_strict_batch = getBooleanField(env, initParams, "cpuStrictBatch");
     int priority_batch = getIntField(env, initParams, "priorityBatch");
-    int poll_batch = getIntField(env, initParams, "pollBatch");
+    bool poll_batch = getBooleanField(env, initParams, "pollBatch");
 
     // TODO: Apply CPU affinity settings when platform-specific code is available
     if (cpu_mask_str) {
@@ -514,11 +484,9 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     }
 
     // === LORA Configuration ===
-    jstring lora_base_str = getStringField(env, initParams, "loraBase");
-    if (lora_base_str) {
-        const char* lora_base_cstr = env->GetStringUTFChars(lora_base_str, nullptr);
-        // TODO: Set LORA base model when API supports it
-        env->ReleaseStringUTFChars(lora_base_str, lora_base_cstr);
+    bool lora_base = getBooleanField(env, initParams, "loraBase");
+    if (lora_base) {
+        // TODO: Handle LORA base model flag when API supports it
     }
 
     // Parse LORA adapters
@@ -574,8 +542,8 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     (void)log_timestamps;
 
     // === Model Modification Parameters ===
-    int quantize_output_tensor = getIntField(env, initParams, "quantizeOutputTensor");
-    int only_write_model_tensor = getIntField(env, initParams, "onlyWriteModelTensor");
+    bool quantize_output_tensor = getBooleanField(env, initParams, "quantizeOutputTensor");
+    bool only_write_model_tensor = getBooleanField(env, initParams, "onlyWriteModelTensor");
 
     // Override key-value pairs for model metadata
     jstring override_kv_str = getStringField(env, initParams, "overrideKv");
@@ -806,20 +774,8 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     int dry_penalty_last_n = getIntField(env, generateParams, "dryPenaltyLastN");
 
     // Custom DRY sequence breakers
-    jobjectArray dry_breakers_array = nullptr;
-    {
-        jclass cls = env->GetObjectClass(generateParams);
-        if (cls) {
-            jfieldID fid = env->GetFieldID(cls, "drySequenceBreakers", "[Ljava/lang/String;");
-            if (fid) {
-                dry_breakers_array = (jobjectArray)env->GetObjectField(generateParams, fid);
-            } else if (env->ExceptionCheck()) {
-                env->ExceptionDescribe();
-                env->ExceptionClear();
-                fprintf(stderr, "WARNING: Field drySequenceBreakers not found\n");
-            }
-        }
-    }
+    jobjectArray dry_breakers_array = (jobjectArray)env->GetObjectField(generateParams,
+        env->GetFieldID(env->GetObjectClass(generateParams), "drySequenceBreakers", "[Ljava/lang/String;"));
     std::vector<std::string> dry_breakers_vec;
     if (dry_breakers_array) {
         jsize breaker_count = env->GetArrayLength(dry_breakers_array);
@@ -1149,20 +1105,8 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
 
     // === Additional missing fields ===
     // Stop sequences
-    jobjectArray stopSequences = nullptr;
-    {
-        jclass cls = env->GetObjectClass(generateParams);
-        if (cls) {
-            jfieldID fid = env->GetFieldID(cls, "stopSequences", "[Ljava/lang/String;");
-            if (fid) {
-                stopSequences = (jobjectArray)env->GetObjectField(generateParams, fid);
-            } else if (env->ExceptionCheck()) {
-                env->ExceptionDescribe();
-                env->ExceptionClear();
-                fprintf(stderr, "WARNING: Field stopSequences not found\n");
-            }
-        }
-    }
+    jobjectArray stopSequences = (jobjectArray)env->GetObjectField(generateParams,
+        env->GetFieldID(env->GetObjectClass(generateParams), "stopSequences", "[Ljava/lang/String;"));
     std::vector<std::string> stop_sequences;
     if (stopSequences) {
         jsize stop_count = env->GetArrayLength(stopSequences);
@@ -1265,7 +1209,9 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     }
 
     // Get keep parameter from GenerateParams
-    if (keep != -1 && keep != data->n_keep) {
+    // -1 means keep all tokens (no limit)
+    // 0 means don't keep any tokens (clear cache each time)
+    if (keep != data->n_keep) {
         data->n_keep = keep;
     }
 
@@ -1611,17 +1557,31 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
 
     // Check if this is a continuation of the previous prompt (for caching)
     bool is_continuation = false;
-    if (!chat_mode && !data->last_prompt.empty()) {
-        // In plain text mode, check if new prompt starts with the old one
+    if (!data->last_prompt.empty()) {
+        // Check if new prompt starts with the old one (works for both chat and plain text mode)
         if (complete_prompt.size() > data->last_prompt.size() &&
             complete_prompt.substr(0, data->last_prompt.size()) == data->last_prompt) {
             is_continuation = true;
-            fprintf(stderr, "\n=== Detected prompt continuation ===\n");
-            fprintf(stderr, "Previous prompt size: %zu chars\n", data->last_prompt.size());
-            fprintf(stderr, "New prompt size: %zu chars\n", complete_prompt.size());
-            fprintf(stderr, "New content: %zu chars\n", complete_prompt.size() - data->last_prompt.size());
-            fprintf(stderr, "===================================\n\n");
+            if (verbose) {
+                fprintf(stderr, "\n=== Detected prompt continuation ===\n");
+                fprintf(stderr, "Previous prompt size: %zu chars\n", data->last_prompt.size());
+                fprintf(stderr, "New prompt size: %zu chars\n", complete_prompt.size());
+                fprintf(stderr, "New content: %zu chars\n", complete_prompt.size() - data->last_prompt.size());
+                fprintf(stderr, "===================================\n\n");
+            }
         }
+    }
+
+    // Debug: show caching status
+    if (verbose) {
+        fprintf(stderr, "\n=== Caching Status ===\n");
+        fprintf(stderr, "cache_prompt: %s\n", cache_prompt ? "true" : "false");
+        fprintf(stderr, "n_keep: %d\n", data->n_keep);
+        fprintf(stderr, "chat_mode: %s\n", chat_mode ? "true" : "false");
+        fprintf(stderr, "is_continuation: %s\n", is_continuation ? "true" : "false");
+        fprintf(stderr, "all_tokens.size: %zu\n", data->all_tokens.size());
+        fprintf(stderr, "n_past: %d\n", data->n_past);
+        fprintf(stderr, "===================\n\n");
     }
 
     // Additional cases for continuation detection:
@@ -1699,20 +1659,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
 
     if (tokenCallback) {
         predicateClass = env->GetObjectClass(tokenCallback);
-        if (!predicateClass) {
-            fprintf(stderr, "ERROR: Failed to get Predicate class\n");
-            tokenCallback = nullptr;
-        } else {
-            testMethod = env->GetMethodID(predicateClass, "test", "(Ljava/lang/Object;)Z");
-            if (!testMethod) {
-                if (env->ExceptionCheck()) {
-                    env->ExceptionDescribe();
-                    env->ExceptionClear();
-                }
-                fprintf(stderr, "ERROR: Failed to find test method in Predicate\n");
-                tokenCallback = nullptr;
-            }
-        }
+        testMethod = env->GetMethodID(predicateClass, "test", "(Ljava/lang/Object;)Z");
     }
 
     // Find common prefix between old and new tokens
@@ -1720,7 +1667,8 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     int min_len = std::min((int)data->all_tokens.size(), (int)prompt_tokens.size());
 
     // If n_keep is 0 or cache_prompt is false, don't reuse any cache
-    if (data->n_keep == 0 || !cache_prompt) {
+    // n_keep == -1 means keep all tokens
+    if ((data->n_keep == 0 || !cache_prompt) && data->n_keep != -1) {
         // Clear everything
 #ifdef __GNUC__
 #pragma GCC diagnostic push
@@ -1777,8 +1725,13 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
         }
 
         // Limit by n_keep if specified
-        if (data->n_keep > 0 && !is_continuation) {
+        // n_keep == -1 means keep all (no limit)
+        if (data->n_keep > 0 && data->n_keep != -1 && !is_continuation) {
+            int old_common_prefix = common_prefix;
             common_prefix = std::min(common_prefix, data->n_keep);
+            if (verbose && old_common_prefix != common_prefix) {
+                fprintf(stderr, "Limited common prefix from %d to %d by n_keep\n", old_common_prefix, common_prefix);
+            }
         }
 
         // Handle KV cache based on common prefix
@@ -1843,15 +1796,7 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
             if (n > 0) {
                 std::string piece(buf, n);
                 jstring tokenJStr = env->NewStringUTF(piece.c_str());
-                jboolean shouldContinue = JNI_TRUE;
-                if (tokenCallback && testMethod) {
-                    shouldContinue = env->CallBooleanMethod(tokenCallback, testMethod, tokenJStr);
-                    if (env->ExceptionCheck()) {
-                        env->ExceptionDescribe();
-                        env->ExceptionClear();
-                        shouldContinue = JNI_FALSE;
-                    }
-                }
+                jboolean shouldContinue = env->CallBooleanMethod(tokenCallback, testMethod, tokenJStr);
                 env->DeleteLocalRef(tokenJStr);
 
                 if (!shouldContinue) {
@@ -2084,10 +2029,19 @@ JNIEXPORT jint JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1generate
     // Add the response to the messages only in chat mode
     if (chat_mode && add_assistant) {
         data->chat_messages.push_back({"assistant", strdup(response.c_str())});
-    } else {
-        // In plain text mode or when add_assistant is false, DON'T include the response in last_prompt
-        // This allows the next call with the same base context to be detected as continuation
-        // data->last_prompt is already set to complete_prompt above
+    }
+
+    // Update last_prompt to include generated text for proper continuation detection
+    // This is important for caching to work correctly
+    if (cache_prompt) {
+        // Update last_prompt to include the generated response
+        // This allows proper continuation detection on the next call
+        data->last_prompt = complete_prompt + response;
+        if (verbose) {
+            fprintf(stderr, "\n=== Updated last_prompt for caching ===\n");
+            fprintf(stderr, "last_prompt size: %zu chars\n", data->last_prompt.size());
+            fprintf(stderr, "=====================================\n");
+        }
     }
 
     // Session save/load handling
@@ -2202,7 +2156,7 @@ JNIEXPORT void JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1clear_1chat
 #ifdef __GNUC__
 #pragma GCC diagnostic pop
 #endif
-    } else if (data->n_keep > 0 && data->n_past > data->n_keep) {
+    } else if (data->n_keep > 0 && data->n_keep != -1 && data->n_past > data->n_keep) {
         // Keep only first n_keep tokens
         data->all_tokens.resize(data->n_keep);
         data->n_past = data->n_keep;
