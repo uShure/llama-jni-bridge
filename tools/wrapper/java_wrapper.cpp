@@ -293,6 +293,9 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     int split_mode = getIntField(env, initParams, "splitMode");
     int main_gpu = getIntField(env, initParams, "mainGpu");
 
+    // Array to store tensor splits - declared at this scope so it remains valid
+    float tensor_split_arr[128] = {0}; // Initialize all to 0
+
     // Parse tensor split string
     jstring tensor_split_str = getStringField(env, initParams, "tensorSplit");
     std::vector<float> tensor_split_vec;
@@ -321,9 +324,17 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
     // === RoPE Configuration ===
     int rope_scaling_type = getIntField(env, initParams, "ropeScalingType");
     float rope_scale = getFloatField(env, initParams, "ropeScale");
-    (void)rope_scale; // TODO: Apply when API supports it
     float rope_freq_base = getFloatField(env, initParams, "ropeFreqBase");
     float rope_freq_scale = getFloatField(env, initParams, "ropeFreqScale");
+
+    // Apply rope_scale by adjusting rope_freq_scale
+    if (rope_scale > 0.0f) {
+        // rope_scale is inverse of freq_scale
+        // If user provides both rope_scale and rope_freq_scale, rope_scale takes precedence
+        rope_freq_scale = 1.0f / rope_scale;
+        // Note: verbose is not available here, it's in GenerateParams
+        fprintf(stderr, "Applied rope_scale %.2f as rope_freq_scale %.2f\n", rope_scale, rope_freq_scale);
+    }
 
     // === YaRN Parameters ===
     int yarn_orig_ctx = getIntField(env, initParams, "yarnOrigCtx");
@@ -502,8 +513,31 @@ JNIEXPORT jlong JNICALL Java_org_llm_wrapper_LlamaCpp_llama_1init
 
     // Apply tensor splits if provided
     if (!tensor_split_vec.empty()) {
-        // Note: LLAMA_MAX_DEVICES no longer exists, tensor_split handled differently
-        // TODO: Implement tensor split with new API
+        // Apply tensor splits to model params
+        // llama.cpp expects normalized values that sum to 1.0
+        float sum = 0.0f;
+        for (float val : tensor_split_vec) {
+            sum += val;
+        }
+
+        // Normalize if needed
+        if (sum > 0.0f && sum != 1.0f) {
+            for (float& val : tensor_split_vec) {
+                val /= sum;
+            }
+        }
+
+        // Copy to our tensor_split array
+        size_t n_splits = std::min(tensor_split_vec.size(), (size_t)128); // Typical max devices
+        for (size_t i = 0; i < n_splits; i++) {
+            tensor_split_arr[i] = tensor_split_vec[i];
+        }
+
+        // Point model_params.tensor_split to our array
+        model_params.tensor_split = tensor_split_arr;
+
+        // verbose is not available here, but we can still print info
+        fprintf(stderr, "Applied tensor splits for %zu devices\n", n_splits);
     }
 
     data->model = llama_model_load_from_file(modelPath_cstr, model_params);
